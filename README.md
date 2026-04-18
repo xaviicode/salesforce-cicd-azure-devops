@@ -255,7 +255,7 @@ salesforce-cicd-azure-devops/
 **Oscar López** — DevOps Engineer
 
 [![GitHub](https://img.shields.io/badge/GitHub-xaviicode-181717?style=for-the-badge&logo=github)](https://github.com/xaviicode)
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-Oscar_López-0A66C2?style=for-the-badge&logo=linkedin)](https://linkedin.com/in/)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Oscar_López-0A66C2?style=for-the-badge&logo=linkedin)](https://www.linkedin.com/in/oscar-javier-l%C3%B3pez-g%C3%B3mez-08a355a3/)
 [![Colombia](https://img.shields.io/badge/📍_Ibagué-Colombia-yellow?style=for-the-badge)](https://github.com/xaviicode)
 
 <br/>
