@@ -1,0 +1,139 @@
+# templates/quality/junit-report-generator.yml
+# JUnit Report Generator Template
+# Converts Salesforce test results to JUnit XML format
+
+parameters:
+- name: testResultsFile
+  type: string
+  default: '$(Build.ArtifactStagingDirectory)/quality-reports/test-results.json'
+- name: outputFile
+  type: string
+  default: '$(Build.ArtifactStagingDirectory)/quality-reports/junit-report.xml'
+
+steps:
+- script: |
+    echo "================================================"
+    echo "JUNIT REPORT GENERATION"
+    echo "================================================"
+    echo "Test Results: ${{ parameters.testResultsFile }}"
+    echo "Output File: ${{ parameters.outputFile }}"
+    echo ""
+    
+    TEST_RESULTS="${{ parameters.testResultsFile }}"
+    OUTPUT_FILE="${{ parameters.outputFile }}"
+    
+    if [ ! -f "$TEST_RESULTS" ]; then
+      echo "⚠️ Test results file not found"
+      echo "Creating empty JUnit report..."
+      
+      cat > $OUTPUT_FILE << 'EOF'
+    <?xml version="1.0" encoding="UTF-8"?>
+    <testsuites name="Salesforce Tests" tests="0" failures="0" errors="0" time="0">
+      <testsuite name="NoTests" tests="0" failures="0" errors="0" time="0" timestamp="$(date -u +"%Y-%m-%dT%H:%M:%S")">
+        <properties>
+          <property name="build" value="$(Build.BuildNumber)"/>
+          <property name="branch" value="$(Build.SourceBranchName)"/>
+        </properties>
+      </testsuite>
+    </testsuites>
+    EOF
+      
+      echo "Empty JUnit report created"
+      exit 0
+    fi
+    
+    echo "Converting Salesforce test results to JUnit format..."
+    
+    # Extract test summary
+    TESTS_RAN=$(cat $TEST_RESULTS | jq -r '.result.summary.testsRan // "0"' 2>/dev/null || echo "0")
+    PASSING=$(cat $TEST_RESULTS | jq -r '.result.summary.passing // "0"' 2>/dev/null || echo "0")
+    FAILING=$(cat $TEST_RESULTS | jq -r '.result.summary.failing // "0"' 2>/dev/null || echo "0")
+    SKIPPED=$(cat $TEST_RESULTS | jq -r '.result.summary.skipped // "0"' 2>/dev/null || echo "0")
+    TEST_TIME=$(cat $TEST_RESULTS | jq -r '.result.summary.testRunTime // "0"' 2>/dev/null || echo "0")
+    COVERAGE=$(cat $TEST_RESULTS | jq -r '.result.summary.orgWideCoverage // "0"' 2>/dev/null || echo "0")
+    
+    echo ""
+    echo "Test Summary:"
+    echo "  Tests Ran: $TESTS_RAN"
+    echo "  Passing: $PASSING"
+    echo "  Failing: $FAILING"
+    echo "  Skipped: $SKIPPED"
+    echo "  Test Time: ${TEST_TIME}ms"
+    echo "  Coverage: ${COVERAGE}%"
+    
+    # Start JUnit XML
+    cat > $OUTPUT_FILE << EOF
+    <?xml version="1.0" encoding="UTF-8"?>
+    <testsuites name="Salesforce Apex Tests" tests="$TESTS_RAN" failures="$FAILING" errors="0" skipped="$SKIPPED" time="$(echo "scale=3; $TEST_TIME / 1000" | bc)" timestamp="$(date -u +"%Y-%m-%dT%H:%M:%S")">
+      <properties>
+        <property name="build.number" value="$(Build.BuildNumber)"/>
+        <property name="build.id" value="$(Build.BuildId)"/>
+        <property name="branch" value="$(Build.SourceBranchName)"/>
+        <property name="commit" value="$(Build.SourceVersion)"/>
+        <property name="coverage" value="$COVERAGE"/>
+        <property name="org.coverage" value="$COVERAGE"/>
+      </properties>
+    EOF
+    
+    # Process each test class
+    cat $TEST_RESULTS | jq -r '.result.tests[]? | @json' 2>/dev/null | while read -r test; do
+      
+      CLASS_NAME=$(echo $test | jq -r '.ApexClass.Name // "Unknown"')
+      METHOD_NAME=$(echo $test | jq -r '.MethodName // "unknown"')
+      OUTCOME=$(echo $test | jq -r '.Outcome // "Unknown"')
+      RUN_TIME=$(echo $test | jq -r '.RunTime // "0"')
+      MESSAGE=$(echo $test | jq -r '.Message // ""' | sed 's/[<>&"]//g')
+      STACK_TRACE=$(echo $test | jq -r '.StackTrace // ""' | sed 's/[<>&"]//g')
+      
+      # Convert milliseconds to seconds
+      TIME_SECONDS=$(echo "scale=3; $RUN_TIME / 1000" | bc 2>/dev/null || echo "0")
+      
+      # Write test case
+      echo "  <testsuite name=\"$CLASS_NAME\" tests=\"1\" failures=\"$([ "$OUTCOME" != "Pass" ] && echo "1" || echo "0")\" errors=\"0\" time=\"$TIME_SECONDS\">" >> $OUTPUT_FILE
+      echo "    <testcase classname=\"$CLASS_NAME\" name=\"$METHOD_NAME\" time=\"$TIME_SECONDS\">" >> $OUTPUT_FILE
+      
+      if [ "$OUTCOME" != "Pass" ]; then
+        echo "      <failure message=\"$MESSAGE\" type=\"$OUTCOME\">" >> $OUTPUT_FILE
+        echo "        <![CDATA[$STACK_TRACE]]>" >> $OUTPUT_FILE
+        echo "      </failure>" >> $OUTPUT_FILE
+      fi
+      
+      echo "    </testcase>" >> $OUTPUT_FILE
+      echo "  </testsuite>" >> $OUTPUT_FILE
+      
+    done
+    
+    # Close testsuites
+    echo "</testsuites>" >> $OUTPUT_FILE
+    
+    echo ""
+    echo "✅ JUnit report generated successfully"
+    echo "Output: $OUTPUT_FILE"
+    
+    # Validate XML
+    if command -v xmllint &> /dev/null; then
+      echo ""
+      echo "Validating XML format..."
+      xmllint --noout $OUTPUT_FILE 2>&1
+      if [ $? -eq 0 ]; then
+        echo "✅ XML validation passed"
+      else
+        echo "⚠️ XML validation warnings (report may still be usable)"
+      fi
+    fi
+    
+  displayName: 'Generate JUnit Report'
+  continueOnError: true
+
+- task: PublishTestResults@2
+  displayName: 'Publish JUnit Test Results'
+  condition: always()
+  inputs:
+    testResultsFormat: 'JUnit'
+    testResultsFiles: '${{ parameters.outputFile }}'
+    searchFolder: '$(Build.ArtifactStagingDirectory)'
+    mergeTestResults: true
+    failTaskOnFailedTests: false
+    testRunTitle: 'Salesforce Apex Tests - $(Build.BuildNumber)'
+    buildConfiguration: '$(Build.SourceBranchName)'
+    publishRunAttachments: true

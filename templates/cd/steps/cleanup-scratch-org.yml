@@ -1,0 +1,108 @@
+# ============================================================================
+# STEP: CLEANUP SCRATCH ORG
+# Purpose: Delete Scratch Org to free up Dev Hub limits
+# Usage: Called by jobs-scratch-org-lifecycle.yml after testing (always runs)
+# ============================================================================
+
+parameters:
+  - name: scratchOrgAlias
+    type: string
+    displayName: 'Scratch Org alias to delete'
+  
+  - name: devHubUsername
+    type: string
+    displayName: 'Dev Hub Username'
+    default: 'xavilopez581661@agentforce.com'
+
+steps:
+  - task: Bash@3
+    displayName: 'List Active Scratch Orgs (Before Cleanup)'
+    condition: always()
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "============================================"
+        echo "ACTIVE SCRATCH ORGS (BEFORE CLEANUP)"
+        echo "============================================"
+        
+        # Authenticate to Dev Hub first
+        sf org login jwt \
+          --client-id "$(Salesforce_Client_ID)" \
+          --jwt-key-file "$(Agent.TempDirectory)/server.key" \
+          --username "${{ parameters.devHubUsername }}" \
+          --set-default-dev-hub \
+          --alias devhub 2>/dev/null || echo "Already authenticated"
+        
+        # List all orgs
+        sf org list --all
+        
+        echo ""
+
+  - task: Bash@3
+    displayName: 'Delete Scratch Org: ${{ parameters.scratchOrgAlias }}'
+    condition: always()
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "============================================"
+        echo "DELETING SCRATCH ORG"
+        echo "============================================"
+        echo "Target: ${{ parameters.scratchOrgAlias }}"
+        
+        # Delete Scratch Org (no-prompt to avoid confirmation)
+        sf org delete scratch \
+          --target-org ${{ parameters.scratchOrgAlias }} \
+          --no-prompt
+        
+        DELETE_EXIT_CODE=$?
+        
+        if [ $DELETE_EXIT_CODE -eq 0 ]; then
+          echo ""
+          echo "[SUCCESS] Scratch Org deleted successfully"
+        else
+          echo ""
+          echo "[WARNING] Failed to delete Scratch Org (Exit Code: $DELETE_EXIT_CODE)"
+          echo "This is not critical - Scratch Org may have already been deleted or expired"
+        fi
+
+  - task: Bash@3
+    displayName: 'Verify Deletion'
+    condition: always()
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "============================================"
+        echo "VERIFYING DELETION"
+        echo "============================================"
+        
+        # List all orgs to confirm deletion
+        sf org list --all
+        
+        # Check if the specific org still exists
+        if sf org display --target-org ${{ parameters.scratchOrgAlias }} 2>/dev/null; then
+          echo ""
+          echo "[WARNING] Scratch Org still appears in the list"
+        else
+          echo ""
+          echo "[SUCCESS] Scratch Org confirmed deleted"
+        fi
+
+  - task: Bash@3
+    displayName: 'List Active Scratch Orgs (After Cleanup)'
+    condition: always()
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "============================================"
+        echo "ACTIVE SCRATCH ORGS (AFTER CLEANUP)"
+        echo "============================================"
+        
+        sf org list --all
+        
+        # Count remaining Scratch Orgs
+        SCRATCH_COUNT=$(sf org list --all | grep -c "ScratchOrg" || echo "0")
+        
+        echo ""
+        echo "Remaining Scratch Orgs: $SCRATCH_COUNT"
+        echo ""
+        echo "[INFO] Cleanup complete"

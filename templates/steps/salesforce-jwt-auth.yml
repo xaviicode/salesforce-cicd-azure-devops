@@ -1,0 +1,87 @@
+# /templates/steps/salesforce-jwt-auth.yml
+parameters:
+- name: instanceUrl
+  type: string
+  default: 'https://login.salesforce.com'
+- name: alias
+  type: string
+  default: 'cicd-org'
+
+steps:
+- task: DownloadSecureFile@1
+  displayName: 'Download JWT Private Key'
+  name: jwtKeyFile
+  inputs:
+    secureFile: 'server.key'
+
+- task: Bash@3
+  displayName: 'Authenticate with Salesforce using JWT'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== SALESFORCE JWT AUTHENTICATION ==="
+      
+      INSTANCE_URL="${{ parameters.instanceUrl }}"
+      USERNAME="$SF_USERNAME"
+      CLIENT_ID="$SF_CLIENT_ID"
+      JWT_KEY_PATH="$(jwtKeyFile.secureFilePath)"
+      ALIAS="${{ parameters.alias }}"
+      
+      echo "Instance URL: $INSTANCE_URL"
+      echo "Username: $USERNAME"
+      echo "Client ID: ${CLIENT_ID:0:20}..."
+      echo "Alias: $ALIAS"
+      echo ""
+      
+      # Verificar variables requeridas
+      if [ -z "$USERNAME" ]; then
+        echo "Error: SF_USERNAME environment variable is not set"
+        echo "Expected variable: Salesforce_Username"
+        exit 1
+      fi
+      
+      if [ -z "$CLIENT_ID" ]; then
+        echo "Error: SF_CLIENT_ID environment variable is not set"
+        echo "Expected variable: Salesforce_Client_ID"
+        exit 1
+      fi
+      
+      # Verificar que el archivo JWT existe
+      if [ ! -f "$JWT_KEY_PATH" ]; then
+        echo "JWT key file not found at: $JWT_KEY_PATH"
+        exit 1
+      fi
+      
+      echo "JWT key file found"
+      echo ""
+      
+      # Autenticar con Salesforce
+      echo "Authenticating with Salesforce..."
+      
+      sf org login jwt \
+        --client-id "$CLIENT_ID" \
+        --jwt-key-file "$JWT_KEY_PATH" \
+        --username "$USERNAME" \
+        --instance-url "$INSTANCE_URL" \
+        --alias "$ALIAS" \
+        --set-default
+      
+      AUTH_RESULT=$?
+      
+      if [ $AUTH_RESULT -eq 0 ]; then
+        echo ""
+        echo "Authentication successful"
+        echo "Org alias set: $ALIAS"
+        echo "Default org configured"
+        echo ""
+        echo "##vso[task.setvariable variable=SF_AUTH_STATUS]SUCCESS"
+        echo "##vso[task.setvariable variable=SF_ORG_ALIAS]$ALIAS"
+      else
+        echo ""
+        echo "Authentication failed with exit code: $AUTH_RESULT"
+        echo "##vso[task.setvariable variable=SF_AUTH_STATUS]FAILED"
+        exit 1
+      fi
+  env:
+    SF_USERNAME: $(Salesforce_Username)
+    SF_CLIENT_ID: $(Salesforce_Client_ID)

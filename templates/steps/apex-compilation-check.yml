@@ -1,0 +1,109 @@
+# /templates/steps/apex-compilation-check.yml
+# Validates Apex code compilation without deployment
+
+parameters:
+- name: targetOrg
+  type: string
+  default: 'cicd-org'
+- name: sourceDirectory
+  type: string
+  default: 'force-app'
+- name: failOnError
+  type: boolean
+  default: true
+
+steps:
+- task: Bash@3
+  displayName: 'Check Apex Compilation'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== APEX COMPILATION CHECK ==="
+      
+      SOURCE_DIR="${{ parameters.sourceDirectory }}"
+      TARGET_ORG="${{ parameters.targetOrg }}"
+      REPORTS_DIR="reports/build"
+      mkdir -p "$REPORTS_DIR"
+      
+      COMPILATION_REPORT="$REPORTS_DIR/apex-compilation.txt"
+      
+      echo "Checking for Apex code..."
+      
+      CLASSES_DIR="$SOURCE_DIR/main/default/classes"
+      
+      if [ ! -d "$CLASSES_DIR" ]; then
+        echo "Classes directory not found: $CLASSES_DIR"
+        echo "Trying alternative path: $SOURCE_DIR/classes"
+        CLASSES_DIR="$SOURCE_DIR/classes"
+      fi
+      
+      if [ ! -d "$CLASSES_DIR" ]; then
+        echo "No Apex classes directory found"
+        echo "No Apex code found in $SOURCE_DIR" > "$COMPILATION_REPORT"
+        echo "##vso[task.setvariable variable=APEX_COMPILATION]SKIPPED"
+        exit 0
+      fi
+      
+      APEX_FILES=$(find "$CLASSES_DIR" -type f -name "*.cls" 2>/dev/null | wc -l)
+      
+      if [ "$APEX_FILES" -eq 0 ]; then
+        echo "No Apex class files found"
+        echo "No Apex code found in $CLASSES_DIR" > "$COMPILATION_REPORT"
+        echo "##vso[task.setvariable variable=APEX_COMPILATION]SKIPPED"
+        exit 0
+      fi
+      
+      echo "Found $APEX_FILES Apex files in $CLASSES_DIR"
+      echo ""
+      
+      echo "Validating Apex compilation..."
+      echo ""
+      
+      sf project deploy validate \
+        --source-dir "$CLASSES_DIR" \
+        --target-org "$TARGET_ORG" \
+        --wait 10 \
+        > "$COMPILATION_REPORT" 2>&1
+      
+      DEPLOY_RESULT=$?
+      
+      if [ $DEPLOY_RESULT -eq 0 ]; then
+        echo ""
+        echo "✅ Apex code compiles successfully"
+        echo "All Apex classes and triggers are valid"
+        echo ""
+        
+        echo "" >> "$COMPILATION_REPORT"
+        echo "========================================" >> "$COMPILATION_REPORT"
+        echo "COMPILATION RESULT: SUCCESS" >> "$COMPILATION_REPORT"
+        echo "========================================" >> "$COMPILATION_REPORT"
+        echo "All Apex code compiles without errors" >> "$COMPILATION_REPORT"
+        echo "Files validated: $APEX_FILES" >> "$COMPILATION_REPORT"
+        
+        echo "##vso[task.setvariable variable=APEX_COMPILATION]SUCCESS"
+      else
+        echo ""
+        echo "❌ Apex compilation failed"
+        echo "Check report for details"
+        echo ""
+        
+        echo "" >> "$COMPILATION_REPORT"
+        echo "========================================" >> "$COMPILATION_REPORT"
+        echo "COMPILATION RESULT: FAILED" >> "$COMPILATION_REPORT"
+        echo "========================================" >> "$COMPILATION_REPORT"
+        echo "Apex code has compilation errors" >> "$COMPILATION_REPORT"
+        echo "Review errors above" >> "$COMPILATION_REPORT"
+        
+        echo "##vso[task.setvariable variable=APEX_COMPILATION]FAILED"
+        
+        echo "Compilation errors:"
+        cat "$COMPILATION_REPORT" | grep -A 5 "Error" || echo "Check full report for details"
+        
+        if [ "${{ parameters.failOnError }}" == "true" ]; then
+          echo ""
+          echo "Build failed due to compilation errors"
+          exit 1
+        fi
+      fi
+      
+      echo "Compilation report saved to: $COMPILATION_REPORT"

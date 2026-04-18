@@ -1,0 +1,31 @@
+# azure-pipelines-eslint-test.yml
+# Pipeline de prueba para ESLint Validation
+
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: ESLint_Analysis
+  displayName: 'ESLint Static Analysis'
+  jobs:
+  - job: Analyze_JavaScript
+    displayName: 'Analyze JavaScript Code Quality'
+    
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      clean: true
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js'
+      inputs:
+        versionSpec: '18.x'
+    
+    - template: templates/steps/eslint-validation.yml
+      parameters:
+        sourceDirectory: 'force-app/main/default/lwc'
+        failOnError: false
+        reportFormat: 'stylish'

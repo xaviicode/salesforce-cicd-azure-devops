@@ -1,0 +1,9 @@
+# templates/jobs-validation.yml (temporal)
+jobs:
+- job: ValidationPlaceholder
+  displayName: 'Validation (Coming Soon)'
+  pool:
+    vmImage: 'ubuntu-latest'
+  steps:
+  - script: echo "Validation stage - to be implemented in Step 2.2"
+    displayName: 'Placeholder'

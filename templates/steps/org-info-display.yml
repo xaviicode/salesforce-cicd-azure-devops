@@ -1,0 +1,95 @@
+# /templates/steps/org-info-display.yml
+# Displays Salesforce org information for pipeline visibility
+
+parameters:
+- name: orgAlias
+  type: string
+  default: 'cicd-org'
+
+steps:
+- task: Bash@3
+  displayName: 'Display Org Information'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== SALESFORCE ORG INFORMATION ==="
+      
+      ORG_ALIAS="${{ parameters.orgAlias }}"
+      
+      # Obtener información detallada
+      sf org display --target-org "$ORG_ALIAS" --verbose
+      
+      echo ""
+      echo "=== ORG LIMITS SUMMARY ==="
+      sf org list limits --target-org "$ORG_ALIAS"
+      
+      echo ""
+      echo "=== AUTHENTICATION STATUS ==="
+      echo "Auth Status: $(SF_AUTH_STATUS)"
+      echo "Connection Status: $(SF_CONNECTION_STATUS)"
+      echo "Permissions: $(SF_PERMISSIONS)"
+      echo "Org Alias: $(SF_ORG_ALIAS)"
+      echo "Org ID: $(SF_ORG_ID)"
+
+- task: Bash@3
+  displayName: 'Create Connection Report'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== CREATING CONNECTION REPORT ==="
+      
+      REPORTS_DIR="reports/connection"
+      mkdir -p "$REPORTS_DIR"
+      
+      REPORT_FILE="$REPORTS_DIR/salesforce-connection-report.txt"
+      
+      cat > "$REPORT_FILE" <<EOF
+      ========================================
+      SALESFORCE CONNECTION REPORT
+      ========================================
+      Generated: $(date -Iseconds)
+      Build: $(Build.BuildNumber)
+      Pipeline: $(Build.DefinitionName)
+      
+      ----------------------------------------
+      AUTHENTICATION DETAILS
+      ----------------------------------------
+      Auth Method: JWT
+      Instance URL: https://login.salesforce.com
+      Username: $(Username)
+      Org Alias: $(SF_ORG_ALIAS)
+      
+      ----------------------------------------
+      CONNECTION STATUS
+      ----------------------------------------
+      Authentication: $(SF_AUTH_STATUS)
+      Connection: $(SF_CONNECTION_STATUS)
+      Permissions: $(SF_PERMISSIONS)
+      Org ID: $(SF_ORG_ID)
+      
+      ----------------------------------------
+      CAPABILITIES
+      ----------------------------------------
+      - Metadata API: Available
+      - Apex Execution: Available
+      - Test Execution: Available
+      - Deployment: Available
+      
+      ========================================
+      EOF
+      
+      echo ""
+      cat "$REPORT_FILE"
+      echo ""
+      
+      echo "Connection report saved to: $REPORT_FILE"
+  env:
+    Username: $(Username)
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Connection Report'
+  condition: always()
+  inputs:
+    PathtoPublish: 'reports/connection'
+    ArtifactName: 'Salesforce-Connection-Report'
+    publishLocation: 'Container'

@@ -1,0 +1,83 @@
+# /templates/steps/environment-validation.yml
+parameters:
+- name: environment
+  type: string
+  default: 'dev'
+
+steps:
+- task: PowerShell@2
+  displayName: 'Validate Environment Variables'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== ENVIRONMENT VALIDATION (${{ parameters.environment }}) ==="
+      
+      $validationErrors = 0
+      
+      # Validar variables críticas
+      $requiredVars = @{
+        'CLIENT_ID' = $env:CLIENT_ID
+        'USERNAME' = $env:USERNAME
+      }
+      
+      foreach ($varName in $requiredVars.Keys) {
+        $varValue = $requiredVars[$varName]
+        if (-not $varValue) {
+          Write-Host "$varName not found or empty"
+          $validationErrors++
+        } else {
+          # Mostrar solo parte de la variable por seguridad
+          if ($varName -eq 'CLIENT_ID') {
+            if ($varValue.Length -ge 15) {
+              Write-Host "${varName}: $($varValue.Substring(0,15))..."
+            } else {
+              Write-Host "${varName}: $varValue"
+            }
+          } else {
+            Write-Host "${varName}: $varValue"
+          }
+        }
+      }
+      
+      if ($validationErrors -gt 0) {
+        Write-Host "$validationErrors environment validation errors found"
+        exit 1
+      }
+      
+      Write-Host "All environment variables validated"
+  env:
+    CLIENT_ID: $(Client_ID)
+    USERNAME: $(Username)
+
+- task: DownloadSecureFile@1
+  displayName: 'Download JWT Private Key'
+  name: jwtKey
+  inputs:
+    secureFile: 'server.key'
+
+- task: PowerShell@2
+  displayName: 'Validate JWT Configuration'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== JWT CONFIGURATION VALIDATION ==="
+      
+      if (Test-Path "$(jwtKey.secureFilePath)") {
+        Write-Host "JWT Key file downloaded successfully"
+        
+        # Verificar formato del certificado
+        $keyContent = Get-Content "$(jwtKey.secureFilePath)" -Raw
+        if ($keyContent -match "-----BEGIN PRIVATE KEY-----") {
+          Write-Host "Valid RSA private key format detected"
+        } else {
+          Write-Host "Invalid key format - RSA private key expected"
+          exit 1
+        }
+        
+        # Crear variable para otros steps
+        Write-Host "##vso[task.setvariable variable=JWT_KEY_PATH]$(jwtKey.secureFilePath)"
+        
+      } else {
+        Write-Host "JWT Key file not found"
+        exit 1
+      }

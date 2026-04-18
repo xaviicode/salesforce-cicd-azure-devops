@@ -1,0 +1,274 @@
+parameters:
+- name: targetOrg
+  type: string
+  default: 'cicd-org'
+- name: baseCommit
+  type: string
+  default: 'HEAD~1'
+- name: compareCommit
+  type: string
+  default: 'HEAD'
+
+steps:
+- script: |
+    echo "============================================"
+    echo "IMPACT ANALYSIS - CONFIGURATION"
+    echo "============================================"
+    echo "Target Org: ${{ parameters.targetOrg }}"
+    echo "Base Commit: ${{ parameters.baseCommit }}"
+    echo "Compare Commit: ${{ parameters.compareCommit }}"
+    echo ""
+  displayName: 'Impact Analysis - Configuration'
+
+- script: |
+    echo "Preparing impact analysis environment..."
+    
+    mkdir -p $(Build.ArtifactStagingDirectory)/impact-reports
+    mkdir -p $(Build.ArtifactStagingDirectory)/impact-analysis
+    
+    echo "Impact analysis environment prepared"
+  displayName: 'Impact Analysis - Environment Preparation'
+
+- script: |
+    echo "============================================"
+    echo "DETECTING CHANGED COMPONENTS"
+    echo "============================================"
+    
+    echo "Analyzing git diff between commits..."
+    
+    git diff --name-only ${{ parameters.baseCommit }} ${{ parameters.compareCommit }} > $(Build.ArtifactStagingDirectory)/impact-analysis/changed-files.txt
+    
+    CHANGED_COUNT=$(cat $(Build.ArtifactStagingDirectory)/impact-analysis/changed-files.txt | wc -l)
+    
+    echo ""
+    echo "CHANGED FILES SUMMARY:"
+    echo "----------------------"
+    echo "Total files changed: $CHANGED_COUNT"
+    echo ""
+    
+    if [ $CHANGED_COUNT -gt 0 ]; then
+      echo "Changed files:"
+      cat $(Build.ArtifactStagingDirectory)/impact-analysis/changed-files.txt
+    else
+      echo "No files changed between commits"
+    fi
+  displayName: 'Impact Analysis - Detect Changes'
+
+- script: |
+    echo "============================================"
+    echo "ANALYZING COMPONENT TYPES"
+    echo "============================================"
+    
+    CHANGED_FILES=$(Build.ArtifactStagingDirectory)/impact-analysis/changed-files.txt
+    
+    if [ ! -f "$CHANGED_FILES" ]; then
+      echo "No changed files to analyze"
+      exit 0
+    fi
+    
+    echo "Categorizing changes by component type..."
+    
+    APEX_CHANGES=$(grep "\.cls$\|\.trigger$" "$CHANGED_FILES" | wc -l)
+    LWC_CHANGES=$(grep "lwc/" "$CHANGED_FILES" | wc -l)
+    AURA_CHANGES=$(grep "aura/" "$CHANGED_FILES" | wc -l)
+    VF_CHANGES=$(grep "\.page$\|\.component$" "$CHANGED_FILES" | wc -l)
+    OBJECT_CHANGES=$(grep "objects/" "$CHANGED_FILES" | wc -l)
+    FLOW_CHANGES=$(grep "flows/" "$CHANGED_FILES" | wc -l)
+    PROFILE_CHANGES=$(grep "profiles/\|permissionsets/" "$CHANGED_FILES" | wc -l)
+    
+    echo ""
+    echo "CHANGES BY COMPONENT TYPE:"
+    echo "--------------------------"
+    echo "Apex (Classes/Triggers): $APEX_CHANGES"
+    echo "Lightning Web Components: $LWC_CHANGES"
+    echo "Aura Components: $AURA_CHANGES"
+    echo "Visualforce: $VF_CHANGES"
+    echo "Objects/Fields: $OBJECT_CHANGES"
+    echo "Flows: $FLOW_CHANGES"
+    echo "Profiles/Permission Sets: $PROFILE_CHANGES"
+    echo ""
+    
+    echo "COMPONENT TYPE ANALYSIS" > $(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+    echo "=======================" >> $(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+    echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+    echo "" >> $(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+    echo "Apex Changes: $APEX_CHANGES" >> $(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+    echo "LWC Changes: $LWC_CHANGES" >> $(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+    echo "Aura Changes: $AURA_CHANGES" >> $(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+    echo "Visualforce Changes: $VF_CHANGES" >> $(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+    echo "Object Changes: $OBJECT_CHANGES" >> $(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+    echo "Flow Changes: $FLOW_CHANGES" >> $(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+    echo "Profile/PermSet Changes: $PROFILE_CHANGES" >> $(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+  displayName: 'Impact Analysis - Component Types'
+
+- script: |
+    echo "============================================"
+    echo "BREAKING CHANGES DETECTION"
+    echo "============================================"
+    
+    CHANGED_FILES=$(Build.ArtifactStagingDirectory)/impact-analysis/changed-files.txt
+    
+    if [ ! -f "$CHANGED_FILES" ]; then
+      echo "No files to analyze for breaking changes"
+      exit 0
+    fi
+    
+    echo "Checking for potentially breaking changes..."
+    
+    BREAKING_INDICATORS=0
+    
+    if grep -q "objects/.*\.object-meta\.xml" "$CHANGED_FILES"; then
+      echo "WARNING: Object metadata changes detected - may affect existing data"
+      BREAKING_INDICATORS=$((BREAKING_INDICATORS + 1))
+    fi
+    
+    if grep -q "\.field-meta\.xml" "$CHANGED_FILES"; then
+      echo "WARNING: Field changes detected - verify field dependencies"
+      BREAKING_INDICATORS=$((BREAKING_INDICATORS + 1))
+    fi
+    
+    if grep -q "profiles/" "$CHANGED_FILES"; then
+      echo "WARNING: Profile changes detected - may affect user permissions"
+      BREAKING_INDICATORS=$((BREAKING_INDICATORS + 1))
+    fi
+    
+    if grep -q "\.workflow-meta\.xml\|\.workflowRule-meta\.xml" "$CHANGED_FILES"; then
+      echo "WARNING: Workflow changes detected - verify automation impact"
+      BREAKING_INDICATORS=$((BREAKING_INDICATORS + 1))
+    fi
+    
+    echo ""
+    echo "Breaking Change Indicators: $BREAKING_INDICATORS"
+    
+    if [ $BREAKING_INDICATORS -eq 0 ]; then
+      echo "STATUS: No obvious breaking changes detected"
+      echo "RISK LEVEL: LOW"
+    elif [ $BREAKING_INDICATORS -le 2 ]; then
+      echo "STATUS: Some potentially breaking changes detected"
+      echo "RISK LEVEL: MEDIUM - Review changes carefully"
+    else
+      echo "STATUS: Multiple breaking change indicators"
+      echo "RISK LEVEL: HIGH - Thorough testing recommended"
+    fi
+    
+    echo $BREAKING_INDICATORS > $(Build.ArtifactStagingDirectory)/impact-reports/breaking-changes-count.txt
+  displayName: 'Impact Analysis - Breaking Changes'
+
+- script: |
+    echo "============================================"
+    echo "DEPENDENCY ANALYSIS"
+    echo "============================================"
+    
+    echo "Analyzing component dependencies..."
+    
+    CHANGED_FILES=$(Build.ArtifactStagingDirectory)/impact-analysis/changed-files.txt
+    
+    if [ ! -f "$CHANGED_FILES" ]; then
+      echo "No files to analyze"
+      exit 0
+    fi
+    
+    if grep -q "\.cls$" "$CHANGED_FILES"; then
+      echo ""
+      echo "APEX CLASS CHANGES DETECTED"
+      echo "Recommend checking:"
+      echo "  - Test class coverage"
+      echo "  - Classes that reference changed classes"
+      echo "  - Triggers that call changed classes"
+      echo "  - Flows/Process Builder calling Apex"
+    fi
+    
+    if grep -q "objects/" "$CHANGED_FILES"; then
+      echo ""
+      echo "OBJECT CHANGES DETECTED"
+      echo "Recommend checking:"
+      echo "  - Related lists and lookups"
+      echo "  - Workflow rules and validation rules"
+      echo "  - Reports and dashboards"
+      echo "  - Apex code referencing the object"
+    fi
+    
+    if grep -q "lwc/" "$CHANGED_FILES"; then
+      echo ""
+      echo "LWC CHANGES DETECTED"
+      echo "Recommend checking:"
+      echo "  - Pages using the component"
+      echo "  - Parent/child component relationships"
+      echo "  - Apex controllers called by LWC"
+    fi
+    
+    echo ""
+    echo "Dependency analysis completed"
+  displayName: 'Impact Analysis - Dependencies'
+
+- script: |
+    echo "============================================"
+    echo "BACKWARD COMPATIBILITY CHECK"
+    echo "============================================"
+    
+    CHANGED_FILES=$(Build.ArtifactStagingDirectory)/impact-analysis/changed-files.txt
+    
+    if [ ! -f "$CHANGED_FILES" ]; then
+      echo "No files to check"
+      exit 0
+    fi
+    
+    COMPATIBILITY_ISSUES=0
+    
+    echo "Checking for potential backward compatibility issues..."
+    
+    if grep -q "\.field-meta\.xml" "$CHANGED_FILES"; then
+      echo ""
+      echo "FIELD METADATA CHANGES"
+      echo "Check for:"
+      echo "  - Required field additions (breaks existing records)"
+      echo "  - Field type changes (may lose data)"
+      echo "  - Picklist value removals (breaks existing data)"
+      COMPATIBILITY_ISSUES=$((COMPATIBILITY_ISSUES + 1))
+    fi
+    
+    if grep -q "\.cls$" "$CHANGED_FILES"; then
+      echo ""
+      echo "APEX CLASS CHANGES"
+      echo "Check for:"
+      echo "  - Method signature changes (breaks callers)"
+      echo "  - Removed public methods (breaks integrations)"
+      echo "  - Changed return types (breaks dependent code)"
+      COMPATIBILITY_ISSUES=$((COMPATIBILITY_ISSUES + 1))
+    fi
+    
+    echo ""
+    echo "Potential Compatibility Issues: $COMPATIBILITY_ISSUES"
+    
+    if [ $COMPATIBILITY_ISSUES -eq 0 ]; then
+      echo "BACKWARD COMPATIBILITY: LIKELY SAFE"
+    else
+      echo "BACKWARD COMPATIBILITY: REVIEW REQUIRED"
+      echo "Manual verification recommended before deployment"
+    fi
+  displayName: 'Impact Analysis - Backward Compatibility'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Impact Analysis - Publish Reports'
+  condition: always()
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/impact-reports'
+    ArtifactName: 'Impact-Analysis-Report'
+    publishLocation: 'Container'
+
+- script: |
+    echo "============================================"
+    echo "IMPACT ANALYSIS - SUMMARY"
+    echo "============================================"
+    
+    COMPONENT_FILE=$(Build.ArtifactStagingDirectory)/impact-reports/component-analysis.txt
+    
+    if [ -f "$COMPONENT_FILE" ]; then
+      cat "$COMPONENT_FILE"
+    fi
+    
+    echo ""
+    echo "Impact analysis completed successfully"
+    echo "Review artifacts for detailed impact assessment"
+  displayName: 'Impact Analysis - Final Summary'
+  condition: always()

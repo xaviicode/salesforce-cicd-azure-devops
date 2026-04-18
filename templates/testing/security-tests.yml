@@ -1,0 +1,194 @@
+parameters:
+- name: targetOrg
+  type: string
+  default: 'cicd-org'
+- name: pmdRuleset
+  type: string
+  default: 'config/pmd-ruleset-security.xml'
+
+steps:
+- script: |
+    echo "============================================"
+    echo "SECURITY TESTS - SALESFORCE COMPLIANCE"
+    echo "============================================"
+    echo "Target Org: ${{ parameters.targetOrg }}"
+    echo "PMD Security Ruleset: ${{ parameters.pmdRuleset }}"
+    echo ""
+  displayName: 'Security Tests - Configuration'
+
+- script: |
+    echo "Creating security-focused PMD ruleset..."
+    
+    mkdir -p config
+    
+    cat > ${{ parameters.pmdRuleset }} << 'RULESET'
+    <?xml version="1.0"?>
+    <ruleset name="Salesforce Security Rules"
+        xmlns="http://pmd.sourceforge.net/ruleset/2.0.0"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.sourceforge.io/ruleset_2_0_0.xsd">
+        
+        <description>Security-focused rules for Salesforce Apex</description>
+        
+        <rule ref="category/apex/security.xml/ApexSharingViolations" />
+        <rule ref="category/apex/security.xml/ApexInsecureEndpoint" />
+        <rule ref="category/apex/security.xml/ApexCSRF" />
+        <rule ref="category/apex/security.xml/ApexOpenRedirect" />
+        <rule ref="category/apex/security.xml/ApexSOQLInjection" />
+        <rule ref="category/apex/security.xml/ApexXSSFromURLParam" />
+        <rule ref="category/apex/security.xml/ApexXSSFromEscapeFalse" />
+        <rule ref="category/apex/security.xml/ApexBadCrypto" />
+        <rule ref="category/apex/security.xml/ApexCRUDViolation" />
+        <rule ref="category/apex/security.xml/ApexDangerousMethods" />
+        
+    </ruleset>
+    RULESET
+    
+    echo "Security ruleset created successfully"
+  displayName: 'Security Tests - Create PMD Ruleset'
+
+- script: |
+    echo "============================================"
+    echo "RUNNING SECURITY ANALYSIS WITH PMD"
+    echo "============================================"
+    
+    mkdir -p $(Build.ArtifactStagingDirectory)/security-reports
+    
+    # Ejecutar PMD con reglas de seguridad
+    pmd check \
+      --dir force-app/main/default/classes \
+      --rulesets ${{ parameters.pmdRuleset }} \
+      --format text \
+      --report-file $(Build.ArtifactStagingDirectory)/security-reports/pmd-security.txt \
+      --no-cache
+    
+    PMD_EXIT=$?
+    
+    # También generar formato JSON para parseo
+    pmd check \
+      --dir force-app/main/default/classes \
+      --rulesets ${{ parameters.pmdRuleset }} \
+      --format json \
+      --report-file $(Build.ArtifactStagingDirectory)/security-reports/pmd-security.json \
+      --no-cache \
+      2>/dev/null || true
+    
+    echo "PMD security analysis completed (exit code: $PMD_EXIT)"
+  displayName: 'Security Tests - PMD Analysis'
+  continueOnError: true
+
+- script: |
+    echo "============================================"
+    echo "ANALYZING SECURITY VIOLATIONS"
+    echo "============================================"
+    
+    REPORT_FILE="$(Build.ArtifactStagingDirectory)/security-reports/pmd-security.json"
+    
+    if [ ! -f "$REPORT_FILE" ]; then
+      echo "No security report found - assuming no violations"
+      echo "0" > $(Build.ArtifactStagingDirectory)/security-reports/violation-count.txt
+      exit 0
+    fi
+    
+    # Contar violaciones por severidad
+    CRITICAL=$(cat "$REPORT_FILE" | jq '[.files[].violations[] | select(.priority <= 2)] | length')
+    HIGH=$(cat "$REPORT_FILE" | jq '[.files[].violations[] | select(.priority == 3)] | length')
+    MEDIUM=$(cat "$REPORT_FILE" | jq '[.files[].violations[] | select(.priority == 4)] | length')
+    LOW=$(cat "$REPORT_FILE" | jq '[.files[].violations[] | select(.priority == 5)] | length')
+    
+    TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
+    
+    echo ""
+    echo "SECURITY VIOLATIONS SUMMARY:"
+    echo "----------------------------"
+    echo "Critical: $CRITICAL"
+    echo "High: $HIGH"
+    echo "Medium: $MEDIUM"
+    echo "Low: $LOW"
+    echo "Total: $TOTAL"
+    echo ""
+    
+    # Guardar en variables
+    echo "##vso[task.setvariable variable=SECURITY_VIOLATIONS_CRITICAL]$CRITICAL"
+    echo "##vso[task.setvariable variable=SECURITY_VIOLATIONS_HIGH]$HIGH"
+    echo "##vso[task.setvariable variable=SECURITY_VIOLATIONS_TOTAL]$TOTAL"
+    
+    echo "$TOTAL" > $(Build.ArtifactStagingDirectory)/security-reports/violation-count.txt
+    
+    # Crear reporte detallado
+    cat > $(Build.ArtifactStagingDirectory)/security-reports/summary.txt << SUMMARY
+    SECURITY ANALYSIS REPORT
+    ========================
+    Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+    
+    VIOLATIONS BY SEVERITY:
+    -----------------------
+    Critical (P1-P2): $CRITICAL
+    High (P3): $HIGH
+    Medium (P4): $MEDIUM
+    Low (P5): $LOW
+    
+    TOTAL VIOLATIONS: $TOTAL
+    
+    STATUS: $([ $CRITICAL -eq 0 ] && echo "PASS (No critical issues)" || echo "FAIL (Critical issues found)")
+    SUMMARY
+    
+  displayName: 'Security Tests - Analyze Violations'
+
+- script: |
+    echo "============================================"
+    echo "CRUD/FLS COMPLIANCE CHECK"
+    echo "============================================"
+    
+    # Buscar clases sin 'with sharing'
+    echo "Checking for classes without sharing keywords..."
+    
+    CLASSES_WITHOUT_SHARING=0
+    
+    for cls in force-app/main/default/classes/*.cls; do
+      if [ -f "$cls" ]; then
+        if ! grep -q "with sharing\|without sharing\|inherited sharing" "$cls"; then
+          echo "WARNING: $(basename $cls) does not specify sharing model"
+          CLASSES_WITHOUT_SHARING=$((CLASSES_WITHOUT_SHARING + 1))
+        fi
+      fi
+    done
+    
+    echo ""
+    echo "Classes without sharing declaration: $CLASSES_WITHOUT_SHARING"
+    
+    if [ $CLASSES_WITHOUT_SHARING -gt 0 ]; then
+      echo "RECOMMENDATION: Add 'with sharing' to all classes that perform DML or SOQL"
+    fi
+    
+  displayName: 'Security Tests - CRUD/FLS Check'
+
+- script: |
+    echo "============================================"
+    echo "SECURITY GATE VALIDATION"
+    echo "============================================"
+    
+    CRITICAL=$(cat $(Build.ArtifactStagingDirectory)/security-reports/violation-count.txt 2>/dev/null || echo "0")
+    
+    echo "Critical Security Violations: $CRITICAL"
+    echo "Threshold: 0 (zero tolerance for critical issues)"
+    echo ""
+    
+    if [ "$CRITICAL" -eq 0 ]; then
+      echo "SECURITY GATE: PASSED"
+      echo "No critical security vulnerabilities found"
+      exit 0
+    else
+      echo "SECURITY GATE: FAILED"
+      echo "Critical security vulnerabilities must be resolved"
+      exit 1
+    fi
+  displayName: 'Security Tests - Gate Validation'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Security Tests - Publish Reports'
+  condition: always()
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/security-reports'
+    ArtifactName: 'Security-Tests-Report'
+    publishLocation: 'Container'

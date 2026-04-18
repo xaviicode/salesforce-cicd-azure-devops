@@ -1,0 +1,63 @@
+# azure-pipelines-build-test.yml
+# Pipeline de prueba para Build & Compilation (Paso 2.5)
+
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- group: Salesforce_CICD_Variables
+
+stages:
+- stage: Build_Validation
+  displayName: 'Build & Compilation Validation'
+  jobs:
+  - job: Validate_Build
+    displayName: 'Validate Metadata and Code'
+    
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      clean: true
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js'
+      inputs:
+        versionSpec: '18.x'
+    
+    - task: Bash@3
+      displayName: 'Install Salesforce CLI'
+      inputs:
+        targetType: 'inline'
+        script: |
+          npm install -g @salesforce/cli@latest
+          sf version
+    
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: 'cicd-org'
+    
+    - template: templates/steps/metadata-syntax-validator.yml
+      parameters:
+        sourceDirectory: 'force-app'
+        failOnError: false
+    
+    - template: templates/steps/apex-compilation-check.yml
+      parameters:
+        targetOrg: 'cicd-org'
+        sourceDirectory: 'force-app'
+        failOnError: false
+    
+    - template: templates/steps/package-validator.yml
+      parameters:
+        manifestPath: 'manifest/allMetadata.xml'
+        minApiVersion: '58.0'
+        maxApiVersion: '62.0'
+        failOnError: false
+    
+    - template: templates/steps/build-summary.yml
+      parameters:
+        buildStage: 'Build Validation Test'

@@ -1,0 +1,27 @@
+# azure-pipelines-pmd-test.yml
+# Pipeline de prueba para PMD Analysis
+
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: PMD_Analysis
+  displayName: 'PMD Static Analysis'
+  jobs:
+  - job: Analyze_Apex
+    displayName: 'Analyze Apex Code Quality'
+    
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      clean: true
+    
+    - template: templates/steps/pmd-scanner.yml
+      parameters:
+        sourceDirectory: 'force-app/main/default'
+        failOnViolation: false
+        reportFormat: 'text'
+        rulesetPath: '.azure/pmd-ruleset.xml'

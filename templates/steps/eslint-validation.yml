@@ -1,0 +1,191 @@
+# /templates/steps/eslint-validation.yml
+# ESLint validation for Lightning Web Components and JavaScript
+# Auto-skips if no JS files found
+
+parameters:
+- name: sourceDirectory
+  type: string
+  default: 'force-app/main/default/lwc'
+- name: failOnError
+  type: boolean
+  default: false
+- name: reportFormat
+  type: string
+  default: 'stylish'
+  values:
+  - stylish
+  - json
+  - html
+  - junit
+
+steps:
+- task: Bash@3
+  displayName: 'Install ESLint and Salesforce Plugins'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== INSTALLING ESLINT ==="
+      
+      # Verificar si existe package.json
+      if [ -f "package.json" ]; then
+        echo "Found existing package.json"
+        
+        # Instalar dependencias existentes primero
+        echo "Installing existing dependencies..."
+        npm install --legacy-peer-deps --loglevel=error
+      fi
+      
+      echo "Installing ESLint and Salesforce plugins..."
+      npm install --no-save --legacy-peer-deps --loglevel=error \
+        eslint@8 \
+        @salesforce/eslint-config-lwc@3 \
+        @salesforce/eslint-plugin-lightning@1
+      
+      if [ $? -eq 0 ]; then
+        echo "ESLint installed successfully"
+        npx eslint --version
+      else
+        echo "Failed to install ESLint"
+        exit 1
+      fi
+
+- task: Bash@3
+  displayName: 'Setup ESLint Configuration'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== SETUP ESLINT CONFIGURATION ==="
+      
+      ESLINT_CONFIG=".eslintrc.json"
+      
+      if [ -f "$ESLINT_CONFIG" ]; then
+        echo "Using existing ESLint config: $ESLINT_CONFIG"
+      else
+        echo "Creating default ESLint configuration..."
+        
+        cat > "$ESLINT_CONFIG" <<'ESLINT_EOF'
+      {
+        "extends": ["@salesforce/eslint-config-lwc/recommended"],
+        "overrides": [
+          {
+            "files": ["*.test.js"],
+            "rules": {
+              "@lwc/lwc/no-unexpected-wire-adapter-usages": "off"
+            }
+          }
+        ],
+        "rules": {
+          "no-console": "warn",
+          "no-debugger": "error",
+          "no-unused-vars": ["error", { "argsIgnorePattern": "^_" }]
+        }
+      }
+      ESLINT_EOF
+        
+        echo "Default ESLint config created"
+      fi
+      
+      if [ ! -f ".eslintignore" ]; then
+        echo "Creating .eslintignore..."
+        cat > ".eslintignore" <<'IGNORE_EOF'
+      **/node_modules/**
+      **/dist/**
+      **/*.min.js
+      IGNORE_EOF
+      fi
+
+- task: Bash@3
+  displayName: 'Run ESLint Analysis'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== RUNNING ESLINT ANALYSIS ==="
+      
+      SOURCE_DIR="${{ parameters.sourceDirectory }}"
+      REPORT_FORMAT="${{ parameters.reportFormat }}"
+      
+      # Crear directorio de reportes SIEMPRE
+      REPORTS_DIR="reports/eslint"
+      mkdir -p "$REPORTS_DIR"
+      REPORT_FILE="$REPORTS_DIR/eslint-report.${REPORT_FORMAT}"
+      
+      # Buscar archivos JavaScript en múltiples ubicaciones
+      JS_LWC=$(find "$SOURCE_DIR" -name "*.js" 2>/dev/null | wc -l)
+      JS_AURA=$(find "force-app/main/default/aura" -name "*.js" 2>/dev/null | wc -l)
+      JS_STATIC=$(find "force-app/main/default/staticresources" -name "*.js" 2>/dev/null | wc -l)
+      
+      TOTAL_JS=$((JS_LWC + JS_AURA + JS_STATIC))
+      
+      if [ "$TOTAL_JS" -eq 0 ]; then
+        echo "No JavaScript files found"
+        echo "Locations checked:"
+        echo "  - LWC: $SOURCE_DIR ($JS_LWC files)"
+        echo "  - Aura: force-app/main/default/aura ($JS_AURA files)"
+        echo "  - Static Resources: force-app/main/default/staticresources ($JS_STATIC files)"
+        echo ""
+        echo "This is expected if your project doesn't have front-end components yet"
+        echo "ESLint analysis skipped"
+        
+        # Crear reporte vacío
+        echo "No JavaScript files found for ESLint analysis" > "$REPORT_FILE"
+        echo "Analysis skipped - no code to analyze" >> "$REPORT_FILE"
+        echo ""
+        echo "Empty report created at: $REPORT_FILE"
+        exit 0
+      fi
+      
+      echo "Found $TOTAL_JS JavaScript files:"
+      echo "  - LWC: $JS_LWC"
+      echo "  - Aura: $JS_AURA"
+      echo "  - Static Resources: $JS_STATIC"
+      echo ""
+      echo "Running ESLint analysis..."
+      
+      # Ejecutar ESLint
+      ESLINT_CMD="npx eslint"
+      
+      if [ "$REPORT_FORMAT" == "stylish" ]; then
+        $ESLINT_CMD "$SOURCE_DIR/**/*.js" --format stylish > "$REPORT_FILE" 2>&1 || EXIT_CODE=$?
+      elif [ "$REPORT_FORMAT" == "json" ]; then
+        $ESLINT_CMD "$SOURCE_DIR/**/*.js" --format json > "$REPORT_FILE" 2>&1 || EXIT_CODE=$?
+      elif [ "$REPORT_FORMAT" == "html" ]; then
+        $ESLINT_CMD "$SOURCE_DIR/**/*.js" --format html > "$REPORT_FILE" 2>&1 || EXIT_CODE=$?
+      elif [ "$REPORT_FORMAT" == "junit" ]; then
+        $ESLINT_CMD "$SOURCE_DIR/**/*.js" --format junit > "$REPORT_FILE" 2>&1 || EXIT_CODE=$?
+      fi
+      
+      echo "ESLint analysis completed"
+      echo "Report saved to: $REPORT_FILE"
+      
+      # Mostrar resumen del reporte
+      if [ "$REPORT_FORMAT" == "stylish" ] && [ -f "$REPORT_FILE" ]; then
+        echo ""
+        echo "=== ESLINT ANALYSIS RESULTS ==="
+        cat "$REPORT_FILE"
+        echo ""
+      fi
+      
+      # Evaluar exit code
+      if [ "${EXIT_CODE:-0}" -eq 0 ]; then
+        echo "No linting errors found - Code quality passed"
+      elif [ "${EXIT_CODE:-0}" -eq 1 ]; then
+        echo ""
+        echo "ESLint found linting issues"
+        
+        if [ "${{ parameters.failOnError }}" == "true" ]; then
+          echo "Failing pipeline due to failOnError=true"
+          exit 1
+        else
+          echo "Continuing pipeline (failOnError=false)"
+        fi
+      else
+        echo "ESLint exited with code: ${EXIT_CODE:-0}"
+      fi
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish ESLint Report'
+  condition: always()
+  inputs:
+    PathtoPublish: 'reports/eslint'
+    ArtifactName: 'ESLint-Analysis-Report'
+    publishLocation: 'Container'

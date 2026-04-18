@@ -1,0 +1,22 @@
+# azure-pipelines-setup-test.yml
+# Pipeline de validación para FASE 2 - PASO 2.1
+
+trigger: none  # Ejecución manual solamente
+
+pr: none  # Sin triggers de PR
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- group: Salesforce_CICD_Variables
+
+stages:
+- stage: Setup_Validation
+  displayName: '🧪 Test: Setup & Prerequisites'
+  jobs:
+  - template: templates/jobs-setup.yml
+    parameters:
+      agentPool: 'ubuntu-latest'
+      nodeVersion: '18.x'
+      environment: 'dev'

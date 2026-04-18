@@ -1,0 +1,23 @@
+# /templates/steps/setup-summary.yml
+steps:
+- task: PowerShell@2
+  displayName: 'Setup Summary & Readiness Check'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== SETUP SUMMARY ==="
+      Write-Host "Agent connectivity validated"
+      Write-Host "Node.js $(node --version) installed"
+      Write-Host "Salesforce CLI ready"
+      Write-Host "Environment variables configured"
+      Write-Host "JWT authentication prepared"
+      Write-Host "Project structure validated"
+      Write-Host "Git and workspace configured"
+      Write-Host ""
+      Write-Host "PIPELINE CONTEXT:"
+      Write-Host "   Branch: $(Build.SourceBranchName)"
+      Write-Host "   Build ID: $(Build.BuildId)"
+      Write-Host "   Repository: $(Build.Repository.Name)"
+      Write-Host ""
+      Write-Host "READY FOR NEXT STAGE: Code Quality & Static Analysis"
+      Write-Host "Setup completed in: $([math]::Round((Get-Date).Subtract([datetime]$env:SYSTEM_PIPELINESTARTTIME).TotalMinutes, 2)) minutes"

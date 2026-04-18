@@ -1,0 +1,242 @@
+# /templates/steps/quality-gate-check.yml
+# Quality Gate evaluation - consolidates all quality checks
+# Determines if code meets minimum standards to proceed
+
+parameters:
+- name: pmdMaxViolations
+  type: number
+  default: 50
+- name: eslintMaxErrors
+  type: number
+  default: 0
+- name: coverageMinimum
+  type: number
+  default: 75
+- name: failOnGateViolation
+  type: boolean
+  default: false
+
+steps:
+- task: Bash@3
+  displayName: 'Evaluate PMD Results'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== EVALUATING PMD RESULTS ==="
+      
+      PMD_REPORT="reports/pmd/pmd-report.txt"
+      
+      if [ -f "$PMD_REPORT" ]; then
+        echo "Found PMD report: $PMD_REPORT"
+        
+        # Contar violaciones (líneas que NO sean headers o vacías)
+        PMD_VIOLATIONS=$(grep -c ":" "$PMD_REPORT" 2>/dev/null || echo "0")
+        
+        echo "PMD Violations Found: $PMD_VIOLATIONS"
+        echo "Maximum Allowed: ${{ parameters.pmdMaxViolations }}"
+        
+        if [ "$PMD_VIOLATIONS" -le "${{ parameters.pmdMaxViolations }}" ]; then
+          echo "PMD Gate: PASS"
+          echo "##vso[task.setvariable variable=PMD_GATE]PASS"
+        else
+          echo "PMD Gate: FAIL (Exceeded threshold)"
+          echo "##vso[task.setvariable variable=PMD_GATE]FAIL"
+        fi
+      else
+        echo "PMD report not found - assuming no analysis ran"
+        echo "PMD Gate: SKIP"
+        echo "##vso[task.setvariable variable=PMD_GATE]SKIP"
+      fi
+
+- task: Bash@3
+  displayName: 'Evaluate ESLint Results'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== EVALUATING ESLINT RESULTS ==="
+      
+      ESLINT_REPORT="reports/eslint/eslint-report.txt"
+      
+      if [ -f "$ESLINT_REPORT" ]; then
+        echo "Found ESLint report: $ESLINT_REPORT"
+        
+        # Buscar "error" en el reporte (case insensitive)
+        ESLINT_ERRORS=$(grep -ic "error" "$ESLINT_REPORT" 2>/dev/null || echo "0")
+        
+        echo "ESLint Errors Found: $ESLINT_ERRORS"
+        echo "Maximum Allowed: ${{ parameters.eslintMaxErrors }}"
+        
+        if [ "$ESLINT_ERRORS" -le "${{ parameters.eslintMaxErrors }}" ]; then
+          echo "ESLint Gate: PASS"
+          echo "##vso[task.setvariable variable=ESLINT_GATE]PASS"
+        else
+          echo "ESLint Gate: FAIL (Exceeded threshold)"
+          echo "##vso[task.setvariable variable=ESLINT_GATE]FAIL"
+        fi
+      else
+        echo "ESLint report not found - assuming no analysis ran"
+        echo "ESLint Gate: SKIP"
+        echo "##vso[task.setvariable variable=ESLINT_GATE]SKIP"
+      fi
+
+- task: Bash@3
+  displayName: 'Evaluate Coverage Results'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== EVALUATING COVERAGE RESULTS ==="
+      
+      COVERAGE_REPORT="reports/coverage/coverage-summary.json"
+      
+      if [ -f "$COVERAGE_REPORT" ]; then
+        echo "Found coverage report: $COVERAGE_REPORT"
+        
+        # Extraer coverage del JSON (formato básico)
+        COVERAGE=$(grep -o '"testRunCoverage":"[0-9]*%"' "$COVERAGE_REPORT" | grep -o '[0-9]*' || echo "0")
+        
+        echo "Code Coverage: ${COVERAGE}%"
+        echo "Minimum Required: ${{ parameters.coverageMinimum }}%"
+        
+        if [ "$COVERAGE" -ge "${{ parameters.coverageMinimum }}" ]; then
+          echo "Coverage Gate: PASS"
+          echo "##vso[task.setvariable variable=COVERAGE_GATE]PASS"
+        else
+          echo "Coverage Gate: FAIL (Below threshold)"
+          echo "##vso[task.setvariable variable=COVERAGE_GATE]FAIL"
+        fi
+      else
+        echo "Coverage report not found - assuming no tests ran"
+        echo "Coverage Gate: SKIP"
+        echo "##vso[task.setvariable variable=COVERAGE_GATE]SKIP"
+      fi
+
+- task: Bash@3
+  displayName: 'Generate Consolidated Quality Report'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== GENERATING CONSOLIDATED QUALITY REPORT ==="
+      
+      REPORTS_DIR="reports/quality-gate"
+      mkdir -p "$REPORTS_DIR"
+      
+      REPORT_FILE="$REPORTS_DIR/quality-gate-report.txt"
+      JSON_FILE="$REPORTS_DIR/quality-gate-summary.json"
+      
+      # Crear reporte de texto
+      cat > "$REPORT_FILE" <<EOF
+      ========================================
+      QUALITY GATE REPORT
+      ========================================
+      Generated: $(date -Iseconds)
+      Build: $(Build.BuildNumber)
+      Branch: $(Build.SourceBranchName)
+      
+      ----------------------------------------
+      GATE RESULTS
+      ----------------------------------------
+      PMD Analysis:     $(PMD_GATE)
+      ESLint Analysis:  $(ESLINT_GATE)
+      Code Coverage:    $(COVERAGE_GATE)
+      
+      ----------------------------------------
+      THRESHOLDS CONFIGURED
+      ----------------------------------------
+      PMD Max Violations:     ${{ parameters.pmdMaxViolations }}
+      ESLint Max Errors:      ${{ parameters.eslintMaxErrors }}
+      Coverage Minimum:       ${{ parameters.coverageMinimum }}%
+      
+      ----------------------------------------
+      OVERALL GATE STATUS
+      ----------------------------------------
+      EOF
+      
+      # Determinar status general
+      GATE_FAILED=0
+      
+      if [ "$(PMD_GATE)" == "FAIL" ]; then
+        GATE_FAILED=1
+        echo "PMD Gate FAILED" >> "$REPORT_FILE"
+      fi
+      
+      if [ "$(ESLINT_GATE)" == "FAIL" ]; then
+        GATE_FAILED=1
+        echo "ESLint Gate FAILED" >> "$REPORT_FILE"
+      fi
+      
+      if [ "$(COVERAGE_GATE)" == "FAIL" ]; then
+        GATE_FAILED=1
+        echo "Coverage Gate FAILED" >> "$REPORT_FILE"
+      fi
+      
+      if [ "$GATE_FAILED" -eq 0 ]; then
+        echo "OVERALL STATUS: PASS" >> "$REPORT_FILE"
+        echo "All quality gates passed successfully" >> "$REPORT_FILE"
+        echo "##vso[task.setvariable variable=QUALITY_GATE_STATUS]PASS"
+      else
+        echo "OVERALL STATUS: FAIL" >> "$REPORT_FILE"
+        echo "One or more quality gates failed" >> "$REPORT_FILE"
+        echo "##vso[task.setvariable variable=QUALITY_GATE_STATUS]FAIL"
+      fi
+      
+      echo "========================================" >> "$REPORT_FILE"
+      
+      # Crear reporte JSON
+      cat > "$JSON_FILE" <<JSON_EOF
+      {
+        "timestamp": "$(date -Iseconds)",
+        "build": "$(Build.BuildNumber)",
+        "branch": "$(Build.SourceBranchName)",
+        "gates": {
+          "pmd": "$(PMD_GATE)",
+          "eslint": "$(ESLINT_GATE)",
+          "coverage": "$(COVERAGE_GATE)"
+        },
+        "thresholds": {
+          "pmdMaxViolations": ${{ parameters.pmdMaxViolations }},
+          "eslintMaxErrors": ${{ parameters.eslintMaxErrors }},
+          "coverageMinimum": ${{ parameters.coverageMinimum }}
+        },
+        "overallStatus": "$(QUALITY_GATE_STATUS)"
+      }
+      JSON_EOF
+      
+      echo ""
+      echo "=== QUALITY GATE REPORT ==="
+      cat "$REPORT_FILE"
+      echo ""
+      
+      echo "Reports generated:"
+      echo "  - Text: $REPORT_FILE"
+      echo "  - JSON: $JSON_FILE"
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Quality Gate Report'
+  condition: always()
+  inputs:
+    PathtoPublish: 'reports/quality-gate'
+    ArtifactName: 'Quality-Gate-Report'
+    publishLocation: 'Container'
+
+- task: Bash@3
+  displayName: 'Quality Gate Decision'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== QUALITY GATE DECISION ==="
+      echo "Overall Status: $(QUALITY_GATE_STATUS)"
+      echo "Fail On Violation: ${{ parameters.failOnGateViolation }}"
+      echo ""
+      
+      if [ "$(QUALITY_GATE_STATUS)" == "FAIL" ]; then
+        if [ "${{ parameters.failOnGateViolation }}" == "true" ]; then
+          echo "Quality Gate FAILED - Stopping pipeline"
+          echo "##vso[task.logissue type=error]Quality gate violations detected. Pipeline cannot proceed."
+          exit 1
+        else
+          echo "Quality Gate FAILED - Continuing pipeline (failOnGateViolation=false)"
+          echo "##vso[task.logissue type=warning]Quality gate violations detected but pipeline continues."
+        fi
+      else
+        echo "Quality Gate PASSED - Pipeline can proceed"
+      fi

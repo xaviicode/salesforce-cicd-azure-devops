@@ -1,0 +1,345 @@
+# templates/quality/metrics-calculator.yml
+# Quality Metrics Calculation Template
+# Calculates comprehensive quality metrics for the codebase
+
+parameters:
+- name: targetOrg
+  type: string
+  default: 'cicd-org'
+- name: sourceDirectory
+  type: string
+  default: 'force-app/main/default'
+- name: coverageThreshold
+  type: number
+  default: 75
+- name: technicalDebtThreshold
+  type: number
+  default: 100
+
+steps:
+- script: |
+    echo "================================================"
+    echo "QUALITY METRICS CALCULATION"
+    echo "================================================"
+    echo "Source Directory: ${{ parameters.sourceDirectory }}"
+    echo "Coverage Threshold: ${{ parameters.coverageThreshold }}%"
+    echo "Technical Debt Threshold: ${{ parameters.technicalDebtThreshold }} hours"
+    echo ""
+    
+    # Create reports directory
+    mkdir -p $(Build.ArtifactStagingDirectory)/quality-reports
+    
+    # Initialize metrics file
+    METRICS_FILE=$(Build.ArtifactStagingDirectory)/quality-reports/metrics.json
+    
+    echo "Initializing metrics collection..."
+    cat > $METRICS_FILE << 'EOF'
+    {
+      "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+      "build": "$(Build.BuildNumber)",
+      "branch": "$(Build.SourceBranchName)",
+      "commit": "$(Build.SourceVersion)",
+      "metrics": {}
+    }
+    EOF
+    
+    echo "Metrics file initialized: $METRICS_FILE"
+    
+  displayName: 'Initialize Metrics Collection'
+
+- script: |
+    echo "================================================"
+    echo "METRIC 1: CODE COVERAGE PERCENTAGE"
+    echo "================================================"
+    
+    # Run Apex tests with coverage
+    echo "Executing Apex tests with code coverage..."
+    
+    sf apex run test \
+      --target-org ${{ parameters.targetOrg }} \
+      --code-coverage \
+      --result-format json \
+      --wait 10 \
+      > $(Build.ArtifactStagingDirectory)/quality-reports/test-results.json 2>&1 || true
+    
+    # Parse coverage from results
+    if [ -f "$(Build.ArtifactStagingDirectory)/quality-reports/test-results.json" ]; then
+      
+      # Extract coverage percentage
+      COVERAGE=$(cat $(Build.ArtifactStagingDirectory)/quality-reports/test-results.json | \
+        jq -r '.result.summary.orgWideCoverage // "0"' 2>/dev/null || echo "0")
+      
+      # Extract test counts
+      TESTS_RAN=$(cat $(Build.ArtifactStagingDirectory)/quality-reports/test-results.json | \
+        jq -r '.result.summary.testsRan // "0"' 2>/dev/null || echo "0")
+      
+      PASSING=$(cat $(Build.ArtifactStagingDirectory)/quality-reports/test-results.json | \
+        jq -r '.result.summary.passing // "0"' 2>/dev/null || echo "0")
+      
+      FAILING=$(cat $(Build.ArtifactStagingDirectory)/quality-reports/test-results.json | \
+        jq -r '.result.summary.failing // "0"' 2>/dev/null || echo "0")
+      
+      echo ""
+      echo "Coverage Results:"
+      echo "  Org-Wide Coverage: ${COVERAGE}%"
+      echo "  Tests Ran: $TESTS_RAN"
+      echo "  Passing: $PASSING"
+      echo "  Failing: $FAILING"
+      
+      # Save to metrics
+      jq --arg cov "$COVERAGE" \
+         --arg tests "$TESTS_RAN" \
+         --arg pass "$PASSING" \
+         --arg fail "$FAILING" \
+         '.metrics.coverage = {
+           "percentage": ($cov | tonumber),
+           "testsRan": ($tests | tonumber),
+           "passing": ($pass | tonumber),
+           "failing": ($fail | tonumber),
+           "threshold": ${{ parameters.coverageThreshold }},
+           "status": (if ($cov | tonumber) >= ${{ parameters.coverageThreshold }} then "PASS" else "FAIL" end)
+         }' $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json > temp.json
+      
+      mv temp.json $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json
+      
+      echo ""
+      if [ "${COVERAGE%.*}" -ge "${{ parameters.coverageThreshold }}" ]; then
+        echo "✅ Coverage threshold MET (${COVERAGE}% >= ${{ parameters.coverageThreshold }}%)"
+      else
+        echo "❌ Coverage threshold NOT MET (${COVERAGE}% < ${{ parameters.coverageThreshold }}%)"
+      fi
+    else
+      echo "⚠️ Could not retrieve coverage data"
+      
+      # Save placeholder
+      jq '.metrics.coverage = {
+        "percentage": 0,
+        "status": "UNKNOWN",
+        "error": "Could not retrieve coverage data"
+      }' $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json > temp.json
+      
+      mv temp.json $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json
+    fi
+    
+  displayName: 'Calculate Code Coverage'
+  continueOnError: true
+
+- script: |
+    echo "================================================"
+    echo "METRIC 2: TECHNICAL DEBT ASSESSMENT"
+    echo "================================================"
+    
+    # Count Apex classes and triggers
+    APEX_CLASSES=$(find ${{ parameters.sourceDirectory }}/classes -name "*.cls" 2>/dev/null | wc -l)
+    APEX_TRIGGERS=$(find ${{ parameters.sourceDirectory }}/triggers -name "*.trigger" 2>/dev/null | wc -l)
+    
+    # Count lines of code
+    APEX_LOC=$(find ${{ parameters.sourceDirectory }}/classes ${{ parameters.sourceDirectory }}/triggers \
+      -type f \( -name "*.cls" -o -name "*.trigger" \) \
+      -exec cat {} + 2>/dev/null | wc -l)
+    
+    # Count LWC components
+    LWC_COMPONENTS=$(find ${{ parameters.sourceDirectory }}/lwc -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    
+    # Count Aura components
+    AURA_COMPONENTS=$(find ${{ parameters.sourceDirectory }}/aura -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    
+    echo ""
+    echo "Codebase Statistics:"
+    echo "  Apex Classes: $APEX_CLASSES"
+    echo "  Apex Triggers: $APEX_TRIGGERS"
+    echo "  Total Apex LOC: $APEX_LOC"
+    echo "  LWC Components: $LWC_COMPONENTS"
+    echo "  Aura Components: $AURA_COMPONENTS"
+    
+    # Calculate technical debt (simple heuristic)
+    # Assume: 1 hour of debt per 200 lines of code without tests
+    # This is a simplified calculation - in production you'd use tools like SonarQube
+    
+    ESTIMATED_DEBT_HOURS=$(echo "scale=2; $APEX_LOC / 200" | bc)
+    
+    echo ""
+    echo "Technical Debt Estimation:"
+    echo "  Estimated Hours: $ESTIMATED_DEBT_HOURS"
+    echo "  Threshold: ${{ parameters.technicalDebtThreshold }} hours"
+    
+    # Determine status
+    DEBT_STATUS="PASS"
+    DEBT_COMPARISON=$(echo "$ESTIMATED_DEBT_HOURS > ${{ parameters.technicalDebtThreshold }}" | bc)
+    if [ "$DEBT_COMPARISON" -eq 1 ]; then
+      DEBT_STATUS="FAIL"
+      echo "  Status: ❌ EXCEEDS THRESHOLD"
+    else
+      echo "  Status: ✅ WITHIN THRESHOLD"
+    fi
+    
+    # Save to metrics
+    jq --arg classes "$APEX_CLASSES" \
+       --arg triggers "$APEX_TRIGGERS" \
+       --arg loc "$APEX_LOC" \
+       --arg lwc "$LWC_COMPONENTS" \
+       --arg aura "$AURA_COMPONENTS" \
+       --arg debt "$ESTIMATED_DEBT_HOURS" \
+       --arg status "$DEBT_STATUS" \
+       '.metrics.technicalDebt = {
+         "apexClasses": ($classes | tonumber),
+         "apexTriggers": ($triggers | tonumber),
+         "apexLinesOfCode": ($loc | tonumber),
+         "lwcComponents": ($lwc | tonumber),
+         "auraComponents": ($aura | tonumber),
+         "estimatedHours": ($debt | tonumber),
+         "threshold": ${{ parameters.technicalDebtThreshold }},
+         "status": $status
+       }' $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json > temp.json
+    
+    mv temp.json $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json
+    
+  displayName: 'Assess Technical Debt'
+  continueOnError: true
+
+- script: |
+    echo "================================================"
+    echo "METRIC 3: SECURITY VULNERABILITY SCORE"
+    echo "================================================"
+    
+    # Check if PMD results exist
+    PMD_REPORT="$(Build.ArtifactStagingDirectory)/pmd-report.json"
+    
+    if [ -f "$PMD_REPORT" ]; then
+      echo "Analyzing PMD security violations..."
+      
+      # Count security-related violations
+      SECURITY_VIOLATIONS=$(cat $PMD_REPORT | jq '[.[] | .violations[] | select(.ruleset == "Security")] | length' 2>/dev/null || echo "0")
+      
+      CRITICAL_SECURITY=$(cat $PMD_REPORT | jq '[.[] | .violations[] | select(.ruleset == "Security" and .priority <= 2)] | length' 2>/dev/null || echo "0")
+      
+      echo ""
+      echo "Security Scan Results:"
+      echo "  Total Security Violations: $SECURITY_VIOLATIONS"
+      echo "  Critical Security Issues: $CRITICAL_SECURITY"
+      
+      # Calculate security score (100 - violations, min 0)
+      SECURITY_SCORE=$(echo "100 - $SECURITY_VIOLATIONS" | bc)
+      if [ "$SECURITY_SCORE" -lt 0 ]; then
+        SECURITY_SCORE=0
+      fi
+      
+      echo "  Security Score: $SECURITY_SCORE/100"
+      
+      # Determine status
+      SECURITY_STATUS="PASS"
+      if [ "$CRITICAL_SECURITY" -gt 0 ]; then
+        SECURITY_STATUS="FAIL"
+        echo "  Status: ❌ CRITICAL ISSUES FOUND"
+      else
+        echo "  Status: ✅ NO CRITICAL ISSUES"
+      fi
+      
+      # Save to metrics
+      jq --arg violations "$SECURITY_VIOLATIONS" \
+         --arg critical "$CRITICAL_SECURITY" \
+         --arg score "$SECURITY_SCORE" \
+         --arg status "$SECURITY_STATUS" \
+         '.metrics.security = {
+           "totalViolations": ($violations | tonumber),
+           "criticalIssues": ($critical | tonumber),
+           "securityScore": ($score | tonumber),
+           "status": $status
+         }' $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json > temp.json
+      
+      mv temp.json $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json
+      
+    else
+      echo "⚠️ PMD report not found - skipping security analysis"
+      echo "Run PMD scanner first to get security metrics"
+      
+      # Save placeholder
+      jq '.metrics.security = {
+        "status": "SKIPPED",
+        "reason": "PMD report not available"
+      }' $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json > temp.json
+      
+      mv temp.json $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json
+    fi
+    
+  displayName: 'Calculate Security Score'
+  continueOnError: true
+
+- script: |
+    echo "================================================"
+    echo "METRIC 4: PERFORMANCE METRICS"
+    echo "================================================"
+    
+    # Check if performance test results exist
+    PERF_REPORT="$(Build.ArtifactStagingDirectory)/performance-test-results.json"
+    
+    if [ -f "$PERF_REPORT" ]; then
+      echo "Analyzing performance test results..."
+      
+      # Extract performance metrics
+      AVG_QUERY_TIME=$(cat $PERF_REPORT | jq -r '.averageQueryTime // "0"' 2>/dev/null)
+      MAX_QUERY_TIME=$(cat $PERF_REPORT | jq -r '.maxQueryTime // "0"' 2>/dev/null)
+      AVG_CPU_TIME=$(cat $PERF_REPORT | jq -r '.averageCpuTime // "0"' 2>/dev/null)
+      MAX_HEAP_SIZE=$(cat $PERF_REPORT | jq -r '.maxHeapSize // "0"' 2>/dev/null)
+      
+      echo ""
+      echo "Performance Metrics:"
+      echo "  Average Query Time: ${AVG_QUERY_TIME}ms"
+      echo "  Max Query Time: ${MAX_QUERY_TIME}ms"
+      echo "  Average CPU Time: ${AVG_CPU_TIME}ms"
+      echo "  Max Heap Size: ${MAX_HEAP_SIZE} bytes"
+      
+      # Determine status (queries under 1000ms, CPU under 5000ms)
+      PERF_STATUS="PASS"
+      if [ "${MAX_QUERY_TIME%.*}" -gt 1000 ] || [ "${AVG_CPU_TIME%.*}" -gt 5000 ]; then
+        PERF_STATUS="WARNING"
+        echo "  Status: ⚠️ PERFORMANCE CONCERNS"
+      else
+        echo "  Status: ✅ PERFORMANCE OK"
+      fi
+      
+      # Save to metrics
+      jq --arg avgQuery "$AVG_QUERY_TIME" \
+         --arg maxQuery "$MAX_QUERY_TIME" \
+         --arg avgCpu "$AVG_CPU_TIME" \
+         --arg maxHeap "$MAX_HEAP_SIZE" \
+         --arg status "$PERF_STATUS" \
+         '.metrics.performance = {
+           "averageQueryTime": ($avgQuery | tonumber),
+           "maxQueryTime": ($maxQuery | tonumber),
+           "averageCpuTime": ($avgCpu | tonumber),
+           "maxHeapSize": ($maxHeap | tonumber),
+           "status": $status
+         }' $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json > temp.json
+      
+      mv temp.json $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json
+      
+    else
+      echo "⚠️ Performance test results not found"
+      echo "Run performance tests first to get metrics"
+      
+      # Save placeholder
+      jq '.metrics.performance = {
+        "status": "SKIPPED",
+        "reason": "Performance test results not available"
+      }' $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json > temp.json
+      
+      mv temp.json $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json
+    fi
+    
+  displayName: 'Calculate Performance Metrics'
+  continueOnError: true
+
+- script: |
+    echo "================================================"
+    echo "QUALITY METRICS SUMMARY"
+    echo "================================================"
+    
+    # Display final metrics
+    cat $(Build.ArtifactStagingDirectory)/quality-reports/metrics.json | jq '.'
+    
+    echo ""
+    echo "Metrics calculation completed"
+    echo "Report saved to: quality-reports/metrics.json"
+    
+  displayName: 'Generate Metrics Summary'

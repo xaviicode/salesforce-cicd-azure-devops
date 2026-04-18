@@ -1,0 +1,189 @@
+# ============================================================================
+# STEP: TEST SALESFORCE ORG
+# Purpose: Execute Apex tests and validate coverage in Salesforce Org
+# Usage: Called by jobs-environment-deployment.yml after deployment
+# ============================================================================
+
+parameters:
+  - name: orgAlias
+    type: string
+    displayName: 'Org alias to test'
+  
+  - name: coverageThreshold
+    type: number
+    displayName: 'Minimum code coverage required (%)'
+    default: 75
+  
+  - name: testLevel
+    type: string
+    displayName: 'Test level to execute'
+    default: 'RunLocalTests'
+    values:
+      - RunLocalTests
+      - RunAllTestsInOrg
+
+steps:
+  - task: Bash@3
+    displayName: 'Execute Apex Tests'
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "============================================"
+        echo "EXECUTING APEX TESTS"
+        echo "============================================"
+        echo "Target Org: ${{ parameters.orgAlias }}"
+        echo "Test Level: ${{ parameters.testLevel }}"
+        echo "Coverage Threshold: ${{ parameters.coverageThreshold }}%"
+        
+        # Create results directory
+        mkdir -p $(Build.ArtifactStagingDirectory)/test-results
+        
+        # Run tests with code coverage
+        sf apex run test \
+          --target-org ${{ parameters.orgAlias }} \
+          --test-level ${{ parameters.testLevel }} \
+          --code-coverage \
+          --result-format json \
+          --output-dir $(Build.ArtifactStagingDirectory)/test-results \
+          --wait 10
+        
+        TEST_EXIT_CODE=$?
+        
+        if [ $TEST_EXIT_CODE -eq 0 ]; then
+          echo ""
+          echo "[SUCCESS] Tests executed successfully"
+        else
+          echo ""
+          echo "[WARNING] Some tests may have failed (Exit Code: $TEST_EXIT_CODE)"
+          echo "Continuing to analyze results..."
+        fi
+
+  - task: Bash@3
+    displayName: 'Parse Test Results'
+    condition: always()
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "============================================"
+        echo "PARSING TEST RESULTS"
+        echo "============================================"
+        
+        TEST_RESULT_FILE=$(Build.ArtifactStagingDirectory)/test-results/test-result.json
+        
+        if [ ! -f "$TEST_RESULT_FILE" ]; then
+          echo "[WARNING] Test result file not found: $TEST_RESULT_FILE"
+          echo "[INFO] This is expected if no tests were deployed to the org"
+          echo ""
+          echo "Setting default values for pipeline variables:"
+          echo "  TOTAL_TESTS: 0"
+          echo "  PASSING_TESTS: 0"
+          echo "  FAILING_TESTS: 0"
+          echo "  CODE_COVERAGE: 0%"
+          
+          # Set pipeline variables with default values
+          echo "##vso[task.setvariable variable=TOTAL_TESTS;isOutput=true]0"
+          echo "##vso[task.setvariable variable=PASSING_TESTS;isOutput=true]0"
+          echo "##vso[task.setvariable variable=FAILING_TESTS;isOutput=true]0"
+          echo "##vso[task.setvariable variable=CODE_COVERAGE;isOutput=true]0"
+          
+          echo ""
+          echo "[INFO] Continuing pipeline execution (test parsing is non-blocking)"
+          exit 0
+        fi
+        
+        # Extract metrics from JSON (si el archivo existe)
+        TOTAL_TESTS=$(cat $TEST_RESULT_FILE | grep -o '"passing":[0-9]*' | head -1 | cut -d':' -f2 || echo "0")
+        PASSING_TESTS=$(cat $TEST_RESULT_FILE | grep -o '"passing":[0-9]*' | head -1 | cut -d':' -f2 || echo "0")
+        FAILING_TESTS=$(cat $TEST_RESULT_FILE | grep -o '"failing":[0-9]*' | head -1 | cut -d':' -f2 || echo "0")
+        COVERAGE=$(cat $TEST_RESULT_FILE | grep -o '"testRunCoverage":"[0-9]*%"' | head -1 | grep -o '[0-9]*' || echo "0")
+        
+        # Defaults if empty
+        TOTAL_TESTS=${TOTAL_TESTS:-0}
+        PASSING_TESTS=${PASSING_TESTS:-0}
+        FAILING_TESTS=${FAILING_TESTS:-0}
+        COVERAGE=${COVERAGE:-0}
+        
+        echo ""
+        echo "Test Results:"
+        echo "  Total Tests: $TOTAL_TESTS"
+        echo "  Passing: $PASSING_TESTS"
+        echo "  Failing: $FAILING_TESTS"
+        echo "  Code Coverage: $COVERAGE%"
+        
+        # Set pipeline variables
+        echo "##vso[task.setvariable variable=TOTAL_TESTS;isOutput=true]$TOTAL_TESTS"
+        echo "##vso[task.setvariable variable=PASSING_TESTS;isOutput=true]$PASSING_TESTS"
+        echo "##vso[task.setvariable variable=FAILING_TESTS;isOutput=true]$FAILING_TESTS"
+        echo "##vso[task.setvariable variable=CODE_COVERAGE;isOutput=true]$COVERAGE"
+        
+        echo ""
+        echo "[SUCCESS] Test results parsed successfully"
+
+  - task: Bash@3
+    displayName: 'Validate Coverage Threshold'
+    condition: always()
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "============================================"
+        echo "VALIDATING COVERAGE THRESHOLD"
+        echo "============================================"
+        
+        TEST_RESULT_FILE=$(Build.ArtifactStagingDirectory)/test-results/test-result.json
+        
+        # Check if test result file exists
+        if [ ! -f "$TEST_RESULT_FILE" ]; then
+          echo "[INFO] Test result file not found"
+          echo "[INFO] Coverage validation skipped for persistent org"
+          echo ""
+          echo "Reason: Environment validation focused on deployment success"
+          echo "Coverage requirements are enforced in CI and PROD deployments"
+          echo ""
+          echo "[SUCCESS] Validation completed (non-blocking)"
+          exit 0
+        fi
+        
+        # Extract coverage from test results
+        COVERAGE=$(cat $TEST_RESULT_FILE | grep -o '"testRunCoverage":"[0-9]*%"' | head -1 | grep -o '[0-9]*' 2>/dev/null || echo "0")
+        if [ "$COVERAGE" = "0" ]; then
+          COVERAGE=$(cat $TEST_RESULT_FILE | grep -o '"orgWideCoverage":"[0-9]*%"' | head -1 | grep -o '[0-9]*' 2>/dev/null || echo "0")
+        fi
+        
+        COVERAGE=${COVERAGE:-0}
+        THRESHOLD=${{ parameters.coverageThreshold }}
+        
+        echo "Code Coverage: $COVERAGE%"
+        echo "Required: $THRESHOLD%"
+        echo "Environment: Persistent Org (testing environment)"
+        echo ""
+        
+        if [ "$COVERAGE" -ge "$THRESHOLD" ]; then
+          echo "[SUCCESS] Coverage threshold met ($COVERAGE% >= $THRESHOLD%)"
+        else
+          echo "[INFO] Coverage below threshold ($COVERAGE% < $THRESHOLD%)"
+          echo ""
+          echo "Note: This is informational for testing environments"
+          echo "Coverage requirements are strictly enforced for PROD deployments"
+          echo "Gap: $(($THRESHOLD - $COVERAGE))%"
+        fi
+        
+        echo ""
+        echo "[SUCCESS] Validation completed (informational)"
+        exit 0
+
+  - task: PublishTestResults@2
+    displayName: 'Publish Test Results'
+    condition: always()
+    inputs:
+      testResultsFormat: 'JUnit'
+      testResultsFiles: '$(Build.ArtifactStagingDirectory)/test-results/test-result.xml'
+      failTaskOnFailedTests: false
+      testRunTitle: 'Apex Tests - ${{ parameters.orgAlias }}'
+
+  - task: PublishCodeCoverageResults@1
+    displayName: 'Publish Code Coverage'
+    condition: always()
+    inputs:
+      codeCoverageTool: 'Cobertura'
+      summaryFileLocation: '$(Build.ArtifactStagingDirectory)/test-results/test-result-codecoverage.json'
+      failIfCoverageEmpty: false

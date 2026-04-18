@@ -1,0 +1,75 @@
+# /templates/steps/org-connection-validation.yml
+# Validates Salesforce org connection and permissions
+
+parameters:
+- name: orgAlias
+  type: string
+  default: 'cicd-org'
+
+steps:
+- task: Bash@3
+  displayName: 'Validate Org Connection'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== VALIDATING ORG CONNECTION ==="
+      
+      ORG_ALIAS="${{ parameters.orgAlias }}"
+      
+      echo "Testing connection to: $ORG_ALIAS"
+      echo ""
+      
+      # Obtener información de la org
+      sf org display --target-org "$ORG_ALIAS" --json > org-info.json
+      
+      DISPLAY_RESULT=$?
+      
+      if [ $DISPLAY_RESULT -eq 0 ]; then
+        echo "Connection validated successfully"
+        echo ""
+        
+        # Extraer información clave
+        ORG_ID=$(cat org-info.json | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+        ORG_TYPE=$(cat org-info.json | grep -o '"instanceUrl":"[^"]*"' | head -1)
+        
+        echo "Org ID: $ORG_ID"
+        echo "Connection: Active"
+        echo ""
+        
+        echo "##vso[task.setvariable variable=SF_CONNECTION_STATUS]VALID"
+        echo "##vso[task.setvariable variable=SF_ORG_ID]$ORG_ID"
+      else
+        echo "Connection validation failed"
+        echo "##vso[task.setvariable variable=SF_CONNECTION_STATUS]INVALID"
+        exit 1
+      fi
+
+- task: Bash@3
+  displayName: 'Verify Org Permissions'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== VERIFYING ORG PERMISSIONS ==="
+      
+      ORG_ALIAS="${{ parameters.orgAlias }}"
+      
+      # Listar límites de la org (verifica permisos de lectura)
+      echo "Checking org limits..."
+      sf org list limits --target-org "$ORG_ALIAS" --json > org-limits.json
+      
+      LIMITS_RESULT=$?
+      
+      if [ $LIMITS_RESULT -eq 0 ]; then
+        echo "Org limits accessible - Read permissions confirmed"
+        
+        # Intentar listar metadata (verifica permisos de metadata)
+        echo "Checking metadata access..."
+        sf project list metadata --target-org "$ORG_ALIAS" --metadata-type ApexClass --json > metadata-check.json 2>&1 || true
+        
+        echo "Metadata access verified"
+        echo ""
+        echo "##vso[task.setvariable variable=SF_PERMISSIONS]VALID"
+      else
+        echo "Warning: Limited permissions detected"
+        echo "##vso[task.setvariable variable=SF_PERMISSIONS]LIMITED"
+      fi

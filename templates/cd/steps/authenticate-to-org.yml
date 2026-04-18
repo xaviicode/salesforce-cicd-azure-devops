@@ -1,0 +1,73 @@
+# ============================================================================
+# Template: Authenticate to Salesforce Org (JWT)
+# Purpose: Authenticate to pre-existing environment using JWT
+# Used by: jobs-environment-deployment.yml
+# ============================================================================
+
+parameters:
+  - name: orgUsername
+    type: string
+    displayName: 'Target Org Username'
+  
+  - name: orgAlias
+    type: string
+    displayName: 'Org Alias'
+    default: 'target-org'
+  
+  - name: clientId
+    type: string
+    displayName: 'Connected App Client ID'
+    default: '$(Client_ID)'
+  
+  - name: jwtKeyFile
+    type: string
+    displayName: 'JWT Key File Path'
+    default: '$(Agent.TempDirectory)/server.key'
+  
+  - name: instanceUrl
+    type: string
+    displayName: 'Instance URL'
+    default: 'https://login.salesforce.com'
+
+steps:
+  - task: Bash@3
+    displayName: 'Authenticate to ${{ parameters.orgAlias }}'
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "============================================"
+        echo "AUTHENTICATING TO SALESFORCE ORG"
+        echo "============================================"
+        
+        echo "Target:"
+        echo "  Alias: ${{ parameters.orgAlias }}"
+        echo "  Username: ${{ parameters.orgUsername }}"
+        echo "  Instance URL: ${{ parameters.instanceUrl }}"
+        echo ""
+        
+        # Authenticate using JWT
+        echo "Authenticating with JWT..."
+        sf org login jwt \
+          --client-id "${{ parameters.clientId }}" \
+          --jwt-key-file "${{ parameters.jwtKeyFile }}" \
+          --username "${{ parameters.orgUsername }}" \
+          --instance-url "${{ parameters.instanceUrl }}" \
+          --alias "${{ parameters.orgAlias }}" \
+          --set-default
+        
+        if [ $? -eq 0 ]; then
+          echo ""
+          echo "[SUCCESS] Authentication successful"
+          
+          # Verify connection
+          echo ""
+          echo "Verifying connection..."
+          sf org display --target-org "${{ parameters.orgAlias }}"
+          
+          echo ""
+          echo "[SUCCESS] Org verified and ready"
+        else
+          echo ""
+          echo "[ERROR] Authentication failed"
+          exit 1
+        fi

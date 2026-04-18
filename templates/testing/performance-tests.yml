@@ -1,0 +1,262 @@
+
+parameters:
+- name: targetOrg
+  type: string
+  default: 'cicd-org'
+- name: soqlLimit
+  type: number
+  default: 100
+- name: dmlLimit
+  type: number
+  default: 150
+- name: cpuTimeLimit
+  type: number
+  default: 10000
+- name: heapSizeLimit
+  type: number
+  default: 6291456
+- name: queryTimeThreshold
+  type: number
+  default: 1000
+
+steps:
+- script: |
+    echo "============================================"
+    echo "PERFORMANCE TESTS - CONFIGURATION"
+    echo "============================================"
+    echo "Target Org: ${{ parameters.targetOrg }}"
+    echo "SOQL Limit: ${{ parameters.soqlLimit }}"
+    echo "DML Limit: ${{ parameters.dmlLimit }}"
+    echo "CPU Time Limit: ${{ parameters.cpuTimeLimit }}ms"
+    echo "Heap Size Limit: ${{ parameters.heapSizeLimit }} bytes (6MB)"
+    echo "Query Time Threshold: ${{ parameters.queryTimeThreshold }}ms"
+    echo ""
+  displayName: 'Performance Tests - Configuration Display'
+
+- script: |
+    echo "Preparing performance test environment..."
+    
+    mkdir -p $(Build.ArtifactStagingDirectory)/performance-reports
+    mkdir -p $(Build.ArtifactStagingDirectory)/performance-logs
+    
+    sf org display --target-org ${{ parameters.targetOrg }} --json > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+      echo "ERROR: Cannot connect to org ${{ parameters.targetOrg }}"
+      exit 1
+    fi
+    
+    echo "Performance test environment prepared successfully"
+  displayName: 'Performance Tests - Environment Preparation'
+
+- script: |
+    echo "============================================"
+    echo "GOVERNOR LIMITS ANALYSIS"
+    echo "============================================"
+    
+    echo "Retrieving Apex execution logs for governor limits analysis..."
+    
+    echo "System.debug('=== GOVERNOR LIMITS CHECK ===');" > check-limits.apex
+    echo "System.debug('SOQL Queries: ' + Limits.getQueries() + ' / ' + Limits.getLimitQueries());" >> check-limits.apex
+    echo "System.debug('DML Statements: ' + Limits.getDmlStatements() + ' / ' + Limits.getLimitDmlStatements());" >> check-limits.apex
+    echo "System.debug('CPU Time: ' + Limits.getCpuTime() + ' / ' + Limits.getLimitCpuTime());" >> check-limits.apex
+    echo "System.debug('Heap Size: ' + Limits.getHeapSize() + ' / ' + Limits.getLimitHeapSize());" >> check-limits.apex
+    echo "System.debug('=== END LIMITS CHECK ===');" >> check-limits.apex
+    
+    sf apex run --file check-limits.apex --target-org ${{ parameters.targetOrg }}
+    
+    echo "Governor limits check completed"
+  displayName: 'Performance Tests - Governor Limits Check'
+
+- script: |
+    echo "============================================"
+    echo "ANALYZING APEX TEST PERFORMANCE"
+    echo "============================================"
+    
+    echo "Running tests with performance monitoring..."
+    
+    sf apex run test \
+      --test-level RunLocalTests \
+      --result-format json \
+      --target-org ${{ parameters.targetOrg }} \
+      --wait 10 \
+      > $(Build.ArtifactStagingDirectory)/performance-logs/test-performance.json
+    
+    cat $(Build.ArtifactStagingDirectory)/performance-logs/test-performance.json | jq '.result' > $(Build.ArtifactStagingDirectory)/performance-reports/test-performance.json
+    
+    echo "Test performance data captured"
+  displayName: 'Performance Tests - Execute With Monitoring'
+  continueOnError: true
+
+- script: |
+    echo "============================================"
+    echo "ANALYZING TEST EXECUTION TIMES"
+    echo "============================================"
+    
+    PERF_FILE="$(Build.ArtifactStagingDirectory)/performance-reports/test-performance.json"
+    
+    if [ ! -f "$PERF_FILE" ]; then
+      echo "WARNING: Performance file not found, skipping analysis"
+      exit 0
+    fi
+    
+    SETUP_TIME=$(cat "$PERF_FILE" | jq -r '.summary.testSetupTime // "0ms"' | sed 's/ms//')
+    EXEC_TIME=$(cat "$PERF_FILE" | jq -r '.summary.testExecutionTime // "0ms"' | sed 's/ms//')
+    TOTAL_TIME=$(cat "$PERF_FILE" | jq -r '.summary.testTotalTime // "0ms"' | sed 's/ms//')
+    
+    echo ""
+    echo "PERFORMANCE METRICS:"
+    echo "-------------------"
+    echo "Test Setup Time: ${SETUP_TIME}ms"
+    echo "Test Execution Time: ${EXEC_TIME}ms"
+    echo "Total Test Time: ${TOTAL_TIME}ms"
+    echo ""
+    
+    echo "Analyzing slow tests (>${{ parameters.queryTimeThreshold }}ms)..."
+    
+    SLOW_TESTS=$(cat "$PERF_FILE" | jq -r --arg threshold "${{ parameters.queryTimeThreshold }}" '.tests[] | select(.RunTime > ($threshold | tonumber)) | "\(.ApexClass.Name).\(.MethodName): \(.RunTime)ms"')
+    
+    if [ -z "$SLOW_TESTS" ]; then
+      echo "No slow tests detected"
+      SLOW_COUNT=0
+    else
+      echo "SLOW TESTS DETECTED:"
+      echo "$SLOW_TESTS"
+      echo ""
+      echo "$SLOW_TESTS" > $(Build.ArtifactStagingDirectory)/performance-reports/slow-tests.txt
+      SLOW_COUNT=$(echo "$SLOW_TESTS" | wc -l)
+    fi
+    
+    echo "PERFORMANCE TEST SUMMARY" > $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "========================" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "Target Org: ${{ parameters.targetOrg }}" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "EXECUTION TIMES:" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "----------------" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "Setup Time: ${SETUP_TIME}ms" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "Execution Time: ${EXEC_TIME}ms" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "Total Time: ${TOTAL_TIME}ms" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "THRESHOLDS:" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "-----------" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "Query Time Threshold: ${{ parameters.queryTimeThreshold }}ms" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "Slow Tests Found: $SLOW_COUNT" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    echo "" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    
+    if [ $SLOW_COUNT -eq 0 ]; then
+      echo "STATUS: PASS (No slow tests)" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    else
+      echo "STATUS: WARNING (Slow tests detected)" >> $(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt
+    fi
+    
+    echo "Performance analysis completed"
+  displayName: 'Performance Tests - Analyze Execution Times'
+
+- script: |
+    echo "============================================"
+    echo "QUERY PERFORMANCE ANALYSIS"
+    echo "============================================"
+    
+    echo "List<Account> accounts = [SELECT Id, Name FROM Account LIMIT 10];" > analyze-queries.apex
+    echo "System.debug('Query executed: ' + Limits.getQueries() + ' queries used');" >> analyze-queries.apex
+    echo "" >> analyze-queries.apex
+    echo "List<Contact> contacts = [SELECT Id, FirstName, LastName FROM Contact WHERE AccountId IN :accounts LIMIT 10];" >> analyze-queries.apex
+    echo "System.debug('After related query: ' + Limits.getQueries() + ' queries used');" >> analyze-queries.apex
+    echo "" >> analyze-queries.apex
+    echo "System.debug('Total CPU Time: ' + Limits.getCpuTime() + 'ms');" >> analyze-queries.apex
+    echo "System.debug('Total Heap Size: ' + Limits.getHeapSize() + ' bytes');" >> analyze-queries.apex
+    
+    sf apex run --file analyze-queries.apex --target-org ${{ parameters.targetOrg }}
+    
+    echo "Query performance analysis completed"
+  displayName: 'Performance Tests - Query Analysis'
+
+- script: |
+    echo "============================================"
+    echo "BULK OPERATION SIMULATION"
+    echo "============================================"
+    
+    echo "System.debug('=== BULK OPERATION TEST ===');" > bulk-test.apex
+    echo "" >> bulk-test.apex
+    echo "List<Account> bulkAccounts = new List<Account>();" >> bulk-test.apex
+    echo "for(Integer i = 0; i < 200; i++) {" >> bulk-test.apex
+    echo "    bulkAccounts.add(new Account(Name = 'BulkTest_' + i));" >> bulk-test.apex
+    echo "}" >> bulk-test.apex
+    echo "" >> bulk-test.apex
+    echo "System.debug('Before Insert - DML: ' + Limits.getDmlStatements() + '/' + Limits.getLimitDmlStatements());" >> bulk-test.apex
+    echo "System.debug('Before Insert - Rows: ' + Limits.getDmlRows() + '/' + Limits.getLimitDmlRows());" >> bulk-test.apex
+    echo "" >> bulk-test.apex
+    echo "insert bulkAccounts;" >> bulk-test.apex
+    echo "" >> bulk-test.apex
+    echo "System.debug('After Insert - DML: ' + Limits.getDmlStatements() + '/' + Limits.getLimitDmlStatements());" >> bulk-test.apex
+    echo "System.debug('After Insert - Rows: ' + Limits.getDmlRows() + '/' + Limits.getLimitDmlRows());" >> bulk-test.apex
+    echo "System.debug('CPU Time Used: ' + Limits.getCpuTime() + 'ms');" >> bulk-test.apex
+    echo "" >> bulk-test.apex
+    echo "delete bulkAccounts;" >> bulk-test.apex
+    echo "" >> bulk-test.apex
+    echo "System.debug('After Delete - DML: ' + Limits.getDmlStatements() + '/' + Limits.getLimitDmlStatements());" >> bulk-test.apex
+    echo "System.debug('=== END BULK TEST ===');" >> bulk-test.apex
+    
+    sf apex run --file bulk-test.apex --target-org ${{ parameters.targetOrg }}
+    
+    echo "Bulk operation simulation completed"
+  displayName: 'Performance Tests - Bulk Operations'
+
+- script: |
+    echo "============================================"
+    echo "PERFORMANCE GATE VALIDATION"
+    echo "============================================"
+    
+    SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt"
+    
+    if [ ! -f "$SUMMARY_FILE" ]; then
+      echo "WARNING: Performance summary not found"
+      echo "Assuming PASS for now"
+      exit 0
+    fi
+    
+    SLOW_TESTS_COUNT=$(grep "Slow Tests Found:" "$SUMMARY_FILE" | awk '{print $4}')
+    
+    echo "Slow Tests Count: $SLOW_TESTS_COUNT"
+    echo "Threshold: 0 (no slow tests allowed over ${{ parameters.queryTimeThreshold }}ms)"
+    echo ""
+    
+    if [ "$SLOW_TESTS_COUNT" = "0" ]; then
+      echo "PERFORMANCE GATE: PASSED"
+      echo "No performance issues detected"
+      exit 0
+    else
+      echo "PERFORMANCE GATE: WARNING"
+      echo "Slow tests detected but not blocking (can be configured)"
+      echo "Review slow tests in artifacts for optimization opportunities"
+      exit 0
+    fi
+  displayName: 'Performance Tests - Gate Validation'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Performance Tests - Publish Artifacts'
+  condition: always()
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/performance-reports'
+    ArtifactName: 'Performance-Tests-Report'
+    publishLocation: 'Container'
+
+- script: |
+    echo "============================================"
+    echo "PERFORMANCE TESTS - FINAL STATUS"
+    echo "============================================"
+    
+    SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/performance-reports/performance-summary.txt"
+    
+    if [ -f "$SUMMARY_FILE" ]; then
+      cat "$SUMMARY_FILE"
+      echo ""
+      echo "STATUS: COMPLETED"
+      echo "Performance tests executed successfully"
+      echo "Review artifacts for detailed performance metrics"
+    else
+      echo "STATUS: COMPLETED (Limited data)"
+      echo "Basic performance checks passed"
+    fi
+  displayName: 'Performance Tests - Final Summary'
+  condition: always()

@@ -1,0 +1,257 @@
+parameters:
+- name: targetOrg
+  type: string
+  default: 'cicd-org'
+- name: backupDir
+  type: string
+  default: 'backup'
+
+steps:
+- script: |
+    echo "============================================"
+    echo "ROLLBACK PLANNING - CONFIGURATION"
+    echo "============================================"
+    echo "Target Org: ${{ parameters.targetOrg }}"
+    echo "Backup Directory: ${{ parameters.backupDir }}"
+    echo ""
+  displayName: 'Rollback Planning - Configuration'
+
+- script: |
+    echo "Preparing rollback planning environment..."
+    
+    mkdir -p $(Build.ArtifactStagingDirectory)/rollback-reports
+    mkdir -p $(Build.ArtifactStagingDirectory)/rollback-plans
+    mkdir -p ${{ parameters.backupDir }}
+    
+    echo "Rollback planning environment prepared"
+  displayName: 'Rollback Planning - Environment Preparation'
+
+- script: |
+    echo "============================================"
+    echo "CAPTURING CURRENT STATE"
+    echo "============================================"
+    
+    echo "Retrieving current org state for rollback reference..."
+    
+    sf org display --target-org ${{ parameters.targetOrg }} --json > $(Build.ArtifactStagingDirectory)/rollback-plans/org-info.json
+    
+    ORG_ID=$(cat $(Build.ArtifactStagingDirectory)/rollback-plans/org-info.json | jq -r '.result.id')
+    USERNAME=$(cat $(Build.ArtifactStagingDirectory)/rollback-plans/org-info.json | jq -r '.result.username')
+    
+    echo ""
+    echo "CURRENT ORG STATE"
+    echo "------------------"
+    echo "Org ID is $ORG_ID"
+    echo "Username is $USERNAME"
+    echo "Timestamp is $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+    echo ""
+    
+    echo "ORG_STATE_CAPTURED" > $(Build.ArtifactStagingDirectory)/rollback-plans/state-capture-status.txt
+    echo "Timestamp $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $(Build.ArtifactStagingDirectory)/rollback-plans/state-capture-status.txt
+    echo "Org ID $ORG_ID" >> $(Build.ArtifactStagingDirectory)/rollback-plans/state-capture-status.txt
+  displayName: 'Rollback Planning - Capture State'
+
+- script: |
+    echo "============================================"
+    echo "IDENTIFYING ROLLBACK COMPONENTS"
+    echo "============================================"
+    
+    CHANGED_FILES=$(Build.ArtifactStagingDirectory)/impact-analysis/changed-files.txt
+    
+    if [ -f "$CHANGED_FILES" ]; then
+      echo "Analyzing components that would need rollback..."
+      
+      COMPONENT_COUNT=$(cat "$CHANGED_FILES" | wc -l)
+      
+      echo ""
+      echo "Components requiring rollback number $COMPONENT_COUNT"
+      echo ""
+      
+      cp "$CHANGED_FILES" $(Build.ArtifactStagingDirectory)/rollback-plans/components-to-rollback.txt
+      
+      echo "ROLLBACK COMPONENT LIST" > $(Build.ArtifactStagingDirectory)/rollback-reports/rollback-components.txt
+      echo "=======================" >> $(Build.ArtifactStagingDirectory)/rollback-reports/rollback-components.txt
+      cat "$CHANGED_FILES" >> $(Build.ArtifactStagingDirectory)/rollback-reports/rollback-components.txt
+    else
+      echo "No changed files detected - rollback may not be necessary"
+      echo "0" > $(Build.ArtifactStagingDirectory)/rollback-plans/component-count.txt
+    fi
+  displayName: 'Rollback Planning - Identify Components'
+
+- script: |
+    echo "============================================"
+    echo "CREATING BACKUP OF CURRENT METADATA"
+    echo "============================================"
+    
+    echo "Creating metadata backup for rollback purposes..."
+    
+    CHANGED_FILES=$(Build.ArtifactStagingDirectory)/rollback-plans/components-to-rollback.txt
+    
+    if [ ! -f "$CHANGED_FILES" ]; then
+      echo "No components to backup"
+      exit 0
+    fi
+    
+    echo "Backing up current versions of changed components..."
+    
+    while IFS= read -r file; do
+      if [ -f "$file" ]; then
+        BACKUP_PATH="${{ parameters.backupDir }}/$file"
+        mkdir -p "$(dirname "$BACKUP_PATH")"
+        cp "$file" "$BACKUP_PATH"
+        echo "Backed up file $file"
+      fi
+    done < "$CHANGED_FILES"
+    
+    echo ""
+    echo "Metadata backup completed"
+    echo "Backup location is ${{ parameters.backupDir }}"
+  displayName: 'Rollback Planning - Backup Metadata'
+
+- script: |
+    echo "============================================"
+    echo "GENERATING ROLLBACK PROCEDURE"
+    echo "============================================"
+    
+    echo "Creating rollback procedure document..."
+    
+    PROCEDURE_FILE=$(Build.ArtifactStagingDirectory)/rollback-reports/rollback-procedure.txt
+    
+    echo "ROLLBACK PROCEDURE" > $PROCEDURE_FILE
+    echo "==================" >> $PROCEDURE_FILE
+    echo "" >> $PROCEDURE_FILE
+    echo "Generated $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $PROCEDURE_FILE
+    echo "Build $(Build.BuildNumber)" >> $PROCEDURE_FILE
+    echo "" >> $PROCEDURE_FILE
+    echo "ROLLBACK STEPS" >> $PROCEDURE_FILE
+    echo "---------------" >> $PROCEDURE_FILE
+    echo "" >> $PROCEDURE_FILE
+    echo "Step 1 - IMMEDIATE ACTIONS" >> $PROCEDURE_FILE
+    echo "   Stop any ongoing deployments" >> $PROCEDURE_FILE
+    echo "   Notify stakeholders of rollback" >> $PROCEDURE_FILE
+    echo "   Document the reason for rollback" >> $PROCEDURE_FILE
+    echo "" >> $PROCEDURE_FILE
+    echo "Step 2 - RETRIEVE BACKUP" >> $PROCEDURE_FILE
+    echo "   Download backup from artifacts" >> $PROCEDURE_FILE
+    echo "   Backup location ${{ parameters.backupDir }}" >> $PROCEDURE_FILE
+    echo "   Verify backup integrity" >> $PROCEDURE_FILE
+    echo "" >> $PROCEDURE_FILE
+    echo "Step 3 - EXECUTE ROLLBACK" >> $PROCEDURE_FILE
+    echo "   Use this command" >> $PROCEDURE_FILE
+    echo "   sf project deploy start --source-dir ${{ parameters.backupDir }} --target-org ${{ parameters.targetOrg }}" >> $PROCEDURE_FILE
+    echo "" >> $PROCEDURE_FILE
+    echo "Step 4 - VERIFICATION" >> $PROCEDURE_FILE
+    echo "   Run smoke tests" >> $PROCEDURE_FILE
+    echo "   Verify critical functionality" >> $PROCEDURE_FILE
+    echo "   Check for any errors in org" >> $PROCEDURE_FILE
+    echo "" >> $PROCEDURE_FILE
+    echo "Step 5 - POST ROLLBACK TASKS" >> $PROCEDURE_FILE
+    echo "   Notify stakeholders of completion" >> $PROCEDURE_FILE
+    echo "   Document lessons learned" >> $PROCEDURE_FILE
+    echo "   Update deployment documentation" >> $PROCEDURE_FILE
+    echo "" >> $PROCEDURE_FILE
+    echo "EMERGENCY CONTACTS" >> $PROCEDURE_FILE
+    echo "-------------------" >> $PROCEDURE_FILE
+    echo "DevOps Team [Add contact info]" >> $PROCEDURE_FILE
+    echo "Salesforce Admin [Add contact info]" >> $PROCEDURE_FILE
+    echo "" >> $PROCEDURE_FILE
+    
+    echo "Rollback procedure generated"
+  displayName: 'Rollback Planning - Generate Procedure'
+
+- script: |
+    echo "============================================"
+    echo "ROLLBACK RISK ASSESSMENT"
+    echo "============================================"
+    
+    COMPONENT_FILE=$(Build.ArtifactStagingDirectory)/rollback-plans/components-to-rollback.txt
+    
+    if [ ! -f "$COMPONENT_FILE" ]; then
+      echo "No components to assess"
+      echo "RISK LEVEL NONE"
+      exit 0
+    fi
+    
+    COMPONENT_COUNT=$(cat "$COMPONENT_FILE" | wc -l)
+    
+    echo "Components to rollback number $COMPONENT_COUNT"
+    echo ""
+    
+    if [ $COMPONENT_COUNT -le 5 ]; then
+      RISK="LOW"
+      echo "RISK ASSESSMENT LOW"
+      echo "Small number of components - rollback should be straightforward"
+    elif [ $COMPONENT_COUNT -le 20 ]; then
+      RISK="MEDIUM"
+      echo "RISK ASSESSMENT MEDIUM"
+      echo "Moderate number of components - test rollback carefully"
+    else
+      RISK="HIGH"
+      echo "RISK ASSESSMENT HIGH"
+      echo "Large number of components - extensive testing required"
+    fi
+    
+    echo ""
+    echo "ROLLBACK RECOMMENDATIONS"
+    echo "-------------------------"
+    
+    if [ "$RISK" = "LOW" ]; then
+      echo "Standard rollback procedure should be sufficient"
+      echo "Minimal testing required post-rollback"
+    elif [ "$RISK" = "MEDIUM" ]; then
+      echo "Consider rollback in maintenance window"
+      echo "Run full regression tests post-rollback"
+      echo "Have support team on standby"
+    else
+      echo "Rollback MUST be in scheduled maintenance window"
+      echo "Full UAT testing required post-rollback"
+      echo "All stakeholders must be notified"
+      echo "Consider partial rollback if possible"
+    fi
+    
+    echo ""
+    echo "Risk assessment completed"
+    echo "RISK_LEVEL=$RISK" > $(Build.ArtifactStagingDirectory)/rollback-reports/risk-level.txt
+  displayName: 'Rollback Planning - Risk Assessment'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Rollback Planning - Publish Backup'
+  condition: always()
+  inputs:
+    PathtoPublish: '${{ parameters.backupDir }}'
+    ArtifactName: 'Rollback-Backup'
+    publishLocation: 'Container'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Rollback Planning - Publish Reports'
+  condition: always()
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/rollback-reports'
+    ArtifactName: 'Rollback-Planning-Report'
+    publishLocation: 'Container'
+
+- script: |
+    echo "============================================"
+    echo "ROLLBACK PLANNING - SUMMARY"
+    echo "============================================"
+    
+    PROCEDURE_FILE=$(Build.ArtifactStagingDirectory)/rollback-reports/rollback-procedure.txt
+    
+    if [ -f "$PROCEDURE_FILE" ]; then
+      echo "Rollback procedure has been generated"
+      echo "Location Artifacts/Rollback-Planning-Report"
+      echo ""
+      echo "Backup location Artifacts/Rollback-Backup"
+    fi
+    
+    RISK_FILE=$(Build.ArtifactStagingDirectory)/rollback-reports/risk-level.txt
+    
+    if [ -f "$RISK_FILE" ]; then
+      cat "$RISK_FILE"
+    fi
+    
+    echo ""
+    echo "Rollback planning completed successfully"
+    echo "All rollback artifacts have been published"
+  displayName: 'Rollback Planning - Final Summary'
+  condition: always() 

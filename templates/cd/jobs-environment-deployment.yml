@@ -1,0 +1,170 @@
+# ============================================================================
+# JOB: Environment Deployment Lifecycle
+# Purpose: Deploy and test code in pre-existing Salesforce environment
+# Used by: azure-pipelines-cd.yml for each stage (DEV, QA, UAT, PROD)
+# ============================================================================
+
+parameters:
+  - name: environmentName
+    type: string
+    displayName: 'Environment Name'
+    values:
+      - DEV
+      - QA
+      - UAT
+      - PROD
+  
+  - name: orgUsername
+    type: string
+    displayName: 'Target Org Username'
+  
+  - name: orgInstanceUrl
+    type: string
+    displayName: 'Target Org Instance URL'
+    default: 'https://test.salesforce.com'
+  
+  - name: orgAlias
+    type: string
+    displayName: 'Org Alias'
+  
+  - name: coverageThreshold
+    type: number
+    displayName: 'Code coverage threshold (%)'
+    default: 75
+  
+  - name: clientId
+    type: string
+    displayName: 'Connected App Client ID'
+    default: '$(Client_ID)'
+
+jobs:
+  - job: Environment_Deployment_${{ parameters.environmentName }}
+    displayName: 'Environment Deployment - ${{ parameters.environmentName }}'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+      # ========================================================================
+      # PHASE 1: PREREQUISITES
+      # ========================================================================
+      
+      - task: DownloadSecureFile@1
+        name: downloadJWTKey
+        displayName: 'Download JWT Key'
+        inputs:
+          secureFile: 'server.key'
+      
+      - task: Bash@3
+        displayName: 'Copy JWT Key to Temp'
+        inputs:
+          targetType: 'inline'
+          script: |
+            echo "Copying JWT key to temp directory..."
+            cp $(downloadJWTKey.secureFilePath) $(Agent.TempDirectory)/server.key
+            chmod 600 $(Agent.TempDirectory)/server.key
+            echo "JWT key ready at: $(Agent.TempDirectory)/server.key"
+      
+      - task: Bash@3
+        displayName: 'Install Salesforce CLI'
+        inputs:
+          targetType: 'inline'
+          script: |
+            echo "Installing Salesforce CLI..."
+            npm install --global @salesforce/cli
+            sf version
+      
+      # ========================================================================
+      # PHASE 2: AUTHENTICATE TO ENVIRONMENT
+      # ========================================================================
+      
+      - template: steps/authenticate-to-org.yml
+        parameters:
+          orgUsername: ${{ parameters.orgUsername }}
+          orgAlias: ${{ parameters.orgAlias }}
+          clientId: ${{ parameters.clientId }}
+          jwtKeyFile: '$(Agent.TempDirectory)/server.key'
+          instanceUrl: ${{ parameters.orgInstanceUrl }}
+      
+      # ========================================================================
+      # PHASE 3: DEPLOY METADATA
+      # ========================================================================
+      
+      - template: steps/deploy-to-org.yml
+        parameters:
+          orgAlias: ${{ parameters.orgAlias }}
+          manifestPath: 'manifest/package-scratch-org.xml'
+          testLevel: 'NoTestRun'
+      
+      # ========================================================================
+      # PHASE 4: TEST AND VALIDATE
+      # ========================================================================
+      
+      - template: steps/test-org.yml
+        parameters:
+          orgAlias: ${{ parameters.orgAlias }}
+          coverageThreshold: ${{ parameters.coverageThreshold }}
+          testLevel: 'RunLocalTests'
+      
+      # ========================================================================
+      # PHASE 5: DEPLOYMENT SUMMARY
+      # ========================================================================
+      
+      - task: Bash@3
+        displayName: 'Deployment Summary'
+        condition: always()
+        inputs:
+          targetType: 'inline'
+          script: |
+            echo "========================================================================"
+            echo "  DEPLOYMENT SUMMARY - ${{ parameters.environmentName }}"
+            echo "========================================================================"
+            echo ""
+            echo "Environment Details:"
+            echo "  Name: ${{ parameters.environmentName }}"
+            echo "  Org Alias: ${{ parameters.orgAlias }}"
+            echo "  Username: ${{ parameters.orgUsername }}"
+            echo "  Instance URL: ${{ parameters.orgInstanceUrl }}"
+            echo ""
+            echo "Deployment Strategy:"
+            echo "  Type: Manifest-based"
+            echo "  Manifest: manifest/package-scratch-org.xml"
+            echo "  Test Level: RunLocalTests"
+            echo "  Coverage Threshold: ${{ parameters.coverageThreshold }}%"
+            echo ""
+            echo "Pipeline Information:"
+            echo "  Build: $(Build.BuildNumber)"
+            echo "  Repository: $(Build.Repository.Name)"
+            echo "  Branch: $(Build.SourceBranchName)"
+            echo "  Commit: $(Build.SourceVersion)"
+            echo ""
+            
+            # Determine overall status
+            if [ "$(Agent.JobStatus)" == "Succeeded" ]; then
+              echo "Overall Status: ✅ SUCCESS"
+              echo ""
+              echo "All deployment phases completed successfully:"
+              echo "  ✅ Authentication"
+              echo "  ✅ Metadata Deployment"
+              echo "  ✅ Apex Tests"
+              echo "  ✅ Coverage Validation"
+            elif [ "$(Agent.JobStatus)" == "SucceededWithIssues" ]; then
+              echo "Overall Status: ⚠️  SUCCEEDED WITH ISSUES"
+              echo ""
+              echo "Deployment completed but some warnings were encountered."
+              echo "Review the logs above for details."
+            else
+              echo "Overall Status: ❌ FAILED"
+              echo ""
+              echo "Deployment failed. Common causes:"
+              echo "  - Authentication issues"
+              echo "  - Metadata deployment errors"
+              echo "  - Test failures"
+              echo "  - Coverage below threshold"
+              echo ""
+              echo "Check the failed step logs above for details."
+            fi
+            
+            echo ""
+            echo "========================================================================"
+            echo "  Environment: ${{ parameters.environmentName }} - Deployment Complete"
+            echo "========================================================================"

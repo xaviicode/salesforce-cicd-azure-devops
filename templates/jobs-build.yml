@@ -1,0 +1,9 @@
+# templates/jobs-build.yml (temporal)
+jobs:
+- job: BuildPlaceholder
+  displayName: 'Build (Coming Soon)'
+  pool:
+    vmImage: 'ubuntu-latest'
+  steps:
+  - script: echo "Build stage - to be implemented in Step 2.5"
+    displayName: 'Placeholder'

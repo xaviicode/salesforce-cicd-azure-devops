@@ -1,0 +1,27 @@
+# azure-pipelines-coverage-test.yml
+# Pipeline de prueba para Code Coverage Check
+
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: Coverage_Analysis
+  displayName: 'Code Coverage Analysis'
+  jobs:
+  - job: Check_Coverage
+    displayName: 'Check Apex Code Coverage'
+    
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      clean: true
+    
+    - template: templates/steps/code-coverage-check.yml
+      parameters:
+        targetOrg: 'scratch-org'
+        coverageThreshold: 75
+        testLevel: 'RunLocalTests'
+        failOnLowCoverage: false

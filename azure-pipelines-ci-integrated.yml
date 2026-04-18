@@ -1,0 +1,641 @@
+# ============================================================================
+# CI-COMPLETE PIPELINE - COMPREHENSIVE VALIDATION FOR INTEGRATION BRANCHES
+# Purpose: Full validation with all quality gates for develop and master
+# Trigger: develop, master (NOT feature branches)
+# Duration: ~15-20 minutes
+# Note: This pipeline triggers CD pipelines on success
+# ============================================================================
+
+name: CI-Complete-$(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  branches:
+    include:
+      - develop
+      - master
+      - main
+    exclude:
+      - feature/*
+      - hotfix/*
+  paths:
+    include:
+      - force-app/**
+      - manifest/**
+      - sfdx-project.json
+    exclude:
+      - README.md
+      - docs/**
+      - scripts/**
+
+pr:
+  branches:
+    include:
+      - master
+      - develop
+      - main
+  paths:
+    include:
+      - force-app/**
+      - manifest/**
+      - sfdx-project.json
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- group: Salesforce_CICD_Variables
+- name: orgAlias
+  value: 'cicd-org'
+- name: nodeVersion
+  value: '18.x'
+- name: apiVersion
+  value: '62.0'
+
+stages:
+# ============================================
+# STAGE 1: GLOBAL SETUP (OPTIMIZADO)
+# ============================================
+- stage: GlobalSetup
+  displayName: 'Stage 1 - Global Setup'
+  jobs:
+  - job: Setup_Environment
+    displayName: 'Setup Build Environment'
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      clean: true
+      fetchDepth: 0
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js $(nodeVersion)'
+      inputs:
+        versionSpec: '$(nodeVersion)'
+    
+    - task: Bash@3
+      displayName: 'Install Salesforce CLI'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Installing Salesforce CLI..."
+          npm install -g @salesforce/cli@latest
+          sf version --verbose
+    
+    - template: templates/steps/agent-connectivity-check.yml
+    
+    - template: templates/steps/environment-validation.yml
+      parameters:
+        environment: 'dev'
+    
+    - template: templates/steps/project-structure-validation.yml
+    
+    - template: templates/steps/workspace-preparation.yml
+    
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: $(orgAlias)
+    
+    - template: templates/steps/org-connection-validation.yml
+      parameters:
+        orgAlias: $(orgAlias)
+    
+    - template: templates/steps/setup-summary.yml
+
+# ============================================
+# STAGE 2: METADATA SYNC
+# ============================================
+- stage: Metadata_Sync
+  displayName: 'Stage 2 - Metadata Synchronization'
+  dependsOn: GlobalSetup
+  condition: succeeded()
+  jobs:
+  - job: Sync_Metadata
+    displayName: 'Sync and Package Metadata'
+    steps:
+    - checkout: self
+      fetchDepth: 0
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js'
+      inputs:
+        versionSpec: '$(nodeVersion)'
+    
+    - task: Bash@3
+      displayName: 'Install Salesforce CLI'
+      inputs:
+        targetType: 'inline'
+        script: npm install -g @salesforce/cli@latest
+    
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: $(orgAlias)
+    
+    - template: templates/steps/metadata-retrieve.yml
+      parameters:
+        targetOrg: $(orgAlias)
+        outputDir: 'force-app'
+        manifestPath: 'manifest/allMetadata.xml'
+    
+    - template: templates/steps/metadata-diff-check.yml
+      parameters:
+        baseCommit: 'origin/master'
+        compareCommit: 'HEAD'
+    
+    - template: templates/steps/metadata-package-builder.yml
+      parameters:
+        packageName: 'ci-deployment'
+        apiVersion: '$(apiVersion)'
+
+# ============================================
+# STAGE 3: CODE QUALITY
+# ============================================
+- stage: Code_Quality
+  displayName: 'Stage 3 - Code Quality Analysis'
+  dependsOn: Metadata_Sync
+  condition: succeeded()
+  jobs:
+  - job: Static_Analysis
+    displayName: 'Static Code Analysis'
+    steps:
+    - checkout: self
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js'
+      inputs:
+        versionSpec: '$(nodeVersion)'
+    
+    - template: templates/steps/pmd-scanner.yml
+      parameters:
+        sourceDirectory: 'force-app/main/default'
+        failOnViolation: false
+        reportFormat: 'text'
+    
+    - template: templates/steps/eslint-validation.yml
+      parameters:
+        sourceDirectory: 'force-app/main/default/lwc'
+        failOnError: false
+        reportFormat: 'stylish'
+
+# ============================================
+# STAGE 4: BUILD VALIDATION
+# ============================================
+- stage: Build_Validation
+  displayName: 'Stage 4 - Build Validation'
+  dependsOn: Code_Quality
+  condition: succeeded()
+  jobs:
+  - job: Validate_Build
+    displayName: 'Build and Compilation Check'
+    steps:
+    - checkout: self
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js'
+      inputs:
+        versionSpec: '$(nodeVersion)'
+    
+    - task: Bash@3
+      displayName: 'Install Dependencies'
+      inputs:
+        targetType: 'inline'
+        script: |
+          npm install -g @salesforce/cli@latest
+          sudo apt-get update
+          sudo apt-get install -y libxml2-utils
+    
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: $(orgAlias)
+    
+    - template: templates/steps/metadata-syntax-validator.yml
+      parameters:
+        sourceDirectory: 'force-app'
+    
+    - template: templates/steps/apex-compilation-check.yml
+      parameters:
+        targetOrg: $(orgAlias)
+    
+    - template: templates/steps/package-validator.yml
+      parameters:
+        manifestPath: 'manifest/allMetadata.xml'
+        minApiVersion: '58.0'
+        maxApiVersion: '62.0'
+        failOnError: false
+    
+    - template: templates/steps/build-summary.yml
+
+# ============================================
+# STAGE 5: TESTING & COVERAGE
+# ============================================
+- stage: Testing
+  displayName: 'Stage 5 - Testing & Coverage'
+  dependsOn: Build_Validation
+  condition: succeeded()
+  jobs:
+  - job: Run_Tests
+    displayName: 'Execute Apex Tests'
+    steps:
+    - checkout: self
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js'
+      inputs:
+        versionSpec: '$(nodeVersion)'
+    
+    - task: Bash@3
+      displayName: 'Install Salesforce CLI'
+      inputs:
+        targetType: 'inline'
+        script: npm install -g @salesforce/cli@latest
+    
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: $(orgAlias)
+    
+    - template: templates/steps/code-coverage-check.yml
+      parameters:
+        targetOrg: $(orgAlias)
+        coverageThreshold: 75
+        testLevel: 'RunLocalTests'
+        failOnLowCoverage: false
+
+# ============================================
+# STAGE 6: QUALITY GATES & REPORTING (PASO 2.8)
+# ============================================
+- stage: QualityGatesReporting
+  displayName: 'Stage 6 - Quality Gates & Reporting'
+  dependsOn:
+  - Code_Quality
+  - Testing
+  - Build_Validation
+  condition: always()
+  jobs:
+  - job: CalculateMetrics
+    displayName: 'Sub-Stage 2.8.1 - Quality Metrics Calculation'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js 18.x'
+      inputs:
+        versionSpec: '18.x'
+    
+    - task: Bash@3
+      displayName: 'Install Salesforce CLI'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Installing Salesforce CLI..."
+          npm install -g @salesforce/cli@latest
+          sf version
+    
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: $(orgAlias)
+    
+    - download: current
+      displayName: 'Download Previous Artifacts'
+      continueOnError: true
+    
+    - template: templates/quality/metrics-calculator.yml
+      parameters:
+        targetOrg: $(orgAlias)
+        sourceDirectory: 'force-app/main/default'
+        coverageThreshold: 75
+        technicalDebtThreshold: 100
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Metrics Artifacts'
+      condition: always()
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/quality-reports'
+        ArtifactName: 'Quality-Metrics'
+        publishLocation: 'Container'
+  
+  - job: EvaluateGates
+    displayName: 'Sub-Stage 2.8.2 - Gate Evaluation'
+    dependsOn: CalculateMetrics
+    condition: always()
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: none
+    
+    - download: current
+      displayName: 'Download Metrics'
+      artifact: 'Quality-Metrics'
+    
+    - script: |
+        echo "Copying metrics to staging directory..."
+        mkdir -p $(Build.ArtifactStagingDirectory)/quality-reports
+        cp -r $(Pipeline.Workspace)/Quality-Metrics/* $(Build.ArtifactStagingDirectory)/quality-reports/
+        ls -la $(Build.ArtifactStagingDirectory)/quality-reports/
+      displayName: 'Prepare Metrics for Evaluation'
+    
+    - template: templates/quality/gate-evaluator.yml
+      parameters:
+        metricsFile: '$(Build.ArtifactStagingDirectory)/quality-reports/metrics.json'
+        coverageMinimum: 75
+        criticalSecurityMax: 0
+        technicalDebtMax: 100
+        performanceQueryMax: 1000
+        failOnGateViolation: false
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Gate Results'
+      condition: always()
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/quality-reports'
+        ArtifactName: 'Gate-Results'
+        publishLocation: 'Container'
+  
+  - job: GenerateReports
+    displayName: 'Sub-Stage 2.8.3 - Artifact Generation'
+    dependsOn: 
+    - CalculateMetrics
+    - EvaluateGates
+    condition: always()
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: none
+    
+    - download: current
+      displayName: 'Download All Quality Artifacts'
+    
+    - script: |
+        echo "Consolidating quality artifacts..."
+        mkdir -p $(Build.ArtifactStagingDirectory)/quality-reports
+        
+        # Copy metrics
+        if [ -d "$(Pipeline.Workspace)/Quality-Metrics" ]; then
+          cp -r $(Pipeline.Workspace)/Quality-Metrics/* $(Build.ArtifactStagingDirectory)/quality-reports/
+        fi
+        
+        # Copy gate results
+        if [ -d "$(Pipeline.Workspace)/Gate-Results" ]; then
+          cp -r $(Pipeline.Workspace)/Gate-Results/* $(Build.ArtifactStagingDirectory)/quality-reports/
+        fi
+        
+        # Copy delta reports if available
+        if [ -d "$(Pipeline.Workspace)/Delta-Deployment-Report" ]; then
+          cp -r $(Pipeline.Workspace)/Delta-Deployment-Report/* $(Build.ArtifactStagingDirectory)/quality-reports/
+        fi
+        
+        # Copy PMD report if available
+        if [ -d "$(Pipeline.Workspace)/PMD-Report" ]; then
+          cp -r $(Pipeline.Workspace)/PMD-Report/* $(Build.ArtifactStagingDirectory)/quality-reports/
+        fi
+        
+        echo "Artifacts consolidated:"
+        ls -la $(Build.ArtifactStagingDirectory)/quality-reports/
+      displayName: 'Consolidate Quality Artifacts'
+    
+    - template: templates/quality/junit-report-generator.yml
+      parameters:
+        testResultsFile: '$(Build.ArtifactStagingDirectory)/quality-reports/test-results.json'
+        outputFile: '$(Build.ArtifactStagingDirectory)/quality-reports/junit-report.xml'
+    
+    - template: templates/quality/quality-report-generator.yml
+      parameters:
+        metricsFile: '$(Build.ArtifactStagingDirectory)/quality-reports/metrics.json'
+        gateResultsFile: '$(Build.ArtifactStagingDirectory)/quality-reports/gate-results.json'
+        outputFile: '$(Build.ArtifactStagingDirectory)/quality-reports/sonar-report.json'
+    
+    - template: templates/quality/artifact-packager.yml
+      parameters:
+        artifactName: 'Quality-Reports-Complete'
+        includeDeploymentPackage: true
+
+# ============================================
+# STAGE 7: COMPREHENSIVE TESTING (PASO 2.6)
+# NOTA: Este stage requiere templates nuevos
+# ============================================
+- stage: ComprehensiveTesting
+  displayName: 'Stage 7 - Comprehensive Testing'
+  dependsOn: QualityGatesReporting
+  condition: succeeded()
+  jobs:
+  - job: UnitTests
+    displayName: 'Sub-Stage 2.6.1 - Unit Tests'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js 18.x'
+      inputs:
+        versionSpec: '18.x'
+    
+    - task: Bash@3
+      displayName: 'Install Salesforce CLI'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Installing Salesforce CLI..."
+          npm install -g @salesforce/cli@latest
+          sf version
+    
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: $(orgAlias)
+    
+    - template: templates/testing/unit-tests.yml
+      parameters:
+        targetOrg: $(orgAlias)
+        testLevel: 'RunLocalTests'
+        coverageThreshold: 75
+        waitTime: 10
+  
+  - job: PerformanceTests
+    displayName: 'Sub-Stage 2.6.4 - Performance Tests'
+    dependsOn: UnitTests
+    condition: succeeded()
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js 18.x'
+      inputs:
+        versionSpec: '18.x'
+    
+    - task: Bash@3
+      displayName: 'Install Salesforce CLI'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Installing Salesforce CLI..."
+          npm install -g @salesforce/cli@latest
+          sf version
+    
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: $(orgAlias)
+    
+    - template: templates/testing/performance-tests.yml
+      parameters:
+        targetOrg: $(orgAlias)
+        soqlLimit: 100
+        dmlLimit: 150
+        cpuTimeLimit: 10000
+        heapSizeLimit: 6291456
+        queryTimeThreshold: 1000
+
+# ============================================
+# STAGE 9: DEPLOYMENT VALIDATION (PASO 2.7)
+# ============================================
+- stage: DeploymentValidation
+  displayName: 'Stage 9 - Deployment Validation'
+  dependsOn: ComprehensiveTesting
+  condition: succeeded()
+  jobs:
+  - job: ValidateDeployment
+    displayName: 'Sub-Stage 2.7.1 - Delta Deployment Validation'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      fetchDepth: 0
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js 18.x'
+      inputs:
+        versionSpec: '18.x'
+    
+    - task: Bash@3
+      displayName: 'Install Salesforce CLI'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Installing Salesforce CLI..."
+          npm install -g @salesforce/cli@latest
+          sf version
+    
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: $(orgAlias)
+    
+    - template: templates/deployment/delta-deployment.yml
+      parameters:
+        targetOrg: $(orgAlias)
+        baseCommit: 'origin/master' 
+        targetCommit: 'HEAD'
+        testLevel: 'RunLocalTests'
+  
+  - job: AnalyzeImpact
+    displayName: 'Sub-Stage 2.7.2 - Impact Analysis'
+    dependsOn: ValidateDeployment
+    condition: always()
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      fetchDepth: 0
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js 18.x'
+      inputs:
+        versionSpec: '18.x'
+    
+    - template: templates/deployment/impact-analysis.yml
+      parameters:
+        targetOrg: $(orgAlias)
+        baseCommit: 'origin/master'
+        compareCommit: 'HEAD'
+  
+  - job: PlanRollback
+    displayName: 'Sub-Stage 2.7.3 - Rollback Planning'
+    dependsOn: 
+    - ValidateDeployment
+    - AnalyzeImpact
+    condition: always()
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      fetchDepth: 0
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js 18.x'
+      inputs:
+        versionSpec: '18.x'
+    
+    - task: Bash@3
+      displayName: 'Install Salesforce CLI'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Installing Salesforce CLI..."
+          npm install -g @salesforce/cli@latest
+          sf version
+    
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: $(orgAlias)
+    
+    - template: templates/deployment/rollback-planning.yml
+      parameters:
+        targetOrg: $(orgAlias)
+        backupDir: 'backup'
+
+# ============================================
+# STAGE 8: SUMMARY
+# ============================================
+- stage: Summary
+  displayName: 'Stage 10 - Pipeline Summary'
+  dependsOn:
+  - GlobalSetup
+  - Metadata_Sync
+  - Code_Quality
+  - Build_Validation
+  - Testing
+  - QualityGatesReporting
+  - ComprehensiveTesting
+  - DeploymentValidation
+  condition: always()
+  jobs:
+  - job: Generate_Summary
+    displayName: 'Generate Pipeline Summary'
+    steps:
+    - checkout: none
+    
+    - script: |
+        echo "========================================="
+        echo "PIPELINE EXECUTION SUMMARY"
+        echo "========================================="
+        echo "Build: $(Build.BuildNumber)"
+        echo "Branch: $(Build.SourceBranchName)"
+        echo "Triggered by: $(Build.RequestedFor)"
+        echo ""
+        echo "Stages Executed:"
+        echo "  - Stage 1: Global Setup"
+        echo "  - Stage 2: Metadata Synchronization"
+        echo "  - Stage 3: Code Quality Analysis"
+        echo "  - Stage 4: Build Validation"
+        echo "  - Stage 5: Testing & Coverage"
+        echo "  - Stage 6: Quality Gate Evaluation"
+        echo "  - Stage 7: Comprehensive Testing"
+        echo "  - Stage 9: Deployment Validation"
+        echo "  - Stage 10: Pipeline Summary"
+        echo ""
+        echo "Pipeline execution completed"
+      displayName: 'Pipeline Execution Summary'

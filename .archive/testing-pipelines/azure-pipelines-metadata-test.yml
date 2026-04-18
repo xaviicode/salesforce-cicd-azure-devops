@@ -1,0 +1,56 @@
+# azure-pipelines-metadata-test.yml
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- group: Salesforce_CICD_Variables
+
+stages:
+- stage: Metadata_Sync
+  displayName: 'Metadata Synchronization Test'
+  jobs:
+  - job: Sync_And_Package
+    displayName: 'Sync Metadata and Build Package'
+    
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      clean: true
+      fetchDepth: 0
+    
+    - task: NodeTool@0
+      displayName: 'Setup Node.js'
+      inputs:
+        versionSpec: '18.x'
+    
+    - task: Bash@3
+      displayName: 'Install Salesforce CLI'
+      inputs:
+        targetType: 'inline'
+        script: |
+          npm install -g @salesforce/cli@latest
+          sf version
+    
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: 'cicd-org'
+    
+    - template: templates/steps/metadata-retrieve.yml
+      parameters:
+        targetOrg: 'cicd-org'
+        outputDir: 'force-app'
+        manifestPath: 'manifest/allMetadata.xml'
+    
+    - template: templates/steps/metadata-diff-check.yml
+      parameters:
+        baseCommit: 'HEAD~1'
+        compareCommit: 'HEAD'
+    
+    - template: templates/steps/metadata-package-builder.yml
+      parameters:
+        packageName: 'ci-deployment'
+        apiVersion: '62.0'

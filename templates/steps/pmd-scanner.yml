@@ -1,0 +1,187 @@
+# /templates/steps/pmd-scanner.yml
+parameters:
+- name: rulesetPath
+  type: string
+  default: '.azure/pmd-ruleset.xml'
+- name: sourceDirectory
+  type: string
+  default: 'force-app/main/default'
+- name: failOnViolation
+  type: boolean
+  default: false
+- name: reportFormat
+  type: string
+  default: 'text'
+  values:
+  - text
+  - xml
+  - html
+  - json
+
+steps:
+- task: Bash@3
+  displayName: 'Install PMD Analyzer'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== INSTALLING PMD ANALYZER ==="
+      
+      PMD_VERSION="7.0.0"
+      PMD_URL="https://github.com/pmd/pmd/releases/download/pmd_releases%2F${PMD_VERSION}/pmd-dist-${PMD_VERSION}-bin.zip"
+      
+      echo "Downloading PMD v${PMD_VERSION}..."
+      
+      PMD_DIR="$(Agent.TempDirectory)/pmd"
+      mkdir -p "$PMD_DIR"
+      
+      wget -q "$PMD_URL" -O "$PMD_DIR/pmd.zip"
+      
+      if [ $? -eq 0 ]; then
+        echo "PMD downloaded successfully"
+      else
+        echo "Failed to download PMD"
+        exit 1
+      fi
+      
+      echo "Extracting PMD..."
+      unzip -q "$PMD_DIR/pmd.zip" -d "$PMD_DIR"
+      
+      PMD_BIN=$(find "$PMD_DIR" -type d -name "bin" | head -n 1)
+      chmod +x "$PMD_BIN/pmd"
+      
+      if [ -d "$PMD_BIN" ]; then
+        echo "PMD installed at: $PMD_BIN"
+        echo "##vso[task.setvariable variable=PMD_HOME]$PMD_BIN"
+      else
+        echo "PMD binary directory not found"
+        exit 1
+      fi
+
+- task: Bash@3
+  displayName: 'Setup PMD Ruleset'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== SETUP PMD RULESET ==="
+      
+      RULESET_PATH=".azure/pmd-ruleset.xml"
+      
+      if [ ! -f "$RULESET_PATH" ]; then
+        echo "Custom ruleset not found, creating default ruleset..."
+        mkdir -p .azure
+        
+        cat > "$RULESET_PATH" <<'PMDEOF'
+      <?xml version="1.0" encoding="UTF-8"?>
+      <ruleset name="Salesforce CI/CD Default Ruleset"
+               xmlns="http://pmd.sourceforge.net/ruleset/2.0.0"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.sourceforge.io/ruleset_2_0_0.xsd">
+          
+          <description>
+              Default PMD ruleset for Salesforce CI/CD pipelines
+          </description>
+          
+          <!-- Best Practices -->
+          <rule ref="category/apex/bestpractices.xml/ApexUnitTestClassShouldHaveAsserts" />
+          <rule ref="category/apex/bestpractices.xml/ApexUnitTestShouldNotUseSeeAllDataTrue" />
+          <rule ref="category/apex/bestpractices.xml/AvoidGlobalModifier" />
+          <rule ref="category/apex/bestpractices.xml/AvoidLogicInTrigger" />
+          <rule ref="category/apex/bestpractices.xml/UnusedLocalVariable" />
+          
+          <!-- Code Style -->
+          <rule ref="category/apex/codestyle.xml/ClassNamingConventions" />
+          <rule ref="category/apex/codestyle.xml/MethodNamingConventions" />
+          <rule ref="category/apex/codestyle.xml/FieldNamingConventions" />
+          <rule ref="category/apex/codestyle.xml/FormalParameterNamingConventions" />
+          <rule ref="category/apex/codestyle.xml/LocalVariableNamingConventions" />
+          <rule ref="category/apex/codestyle.xml/PropertyNamingConventions" />
+          
+          <!-- Design -->
+          <rule ref="category/apex/design.xml/AvoidDeeplyNestedIfStmts" />
+          <rule ref="category/apex/design.xml/CyclomaticComplexity" />
+          <rule ref="category/apex/design.xml/ExcessiveClassLength" />
+          <rule ref="category/apex/design.xml/ExcessiveParameterList" />
+          <rule ref="category/apex/design.xml/ExcessivePublicCount" />
+          
+          <!-- Error Prone -->
+          <rule ref="category/apex/errorprone.xml/AvoidDirectAccessTriggerMap" />
+          <rule ref="category/apex/errorprone.xml/AvoidHardcodingId" />
+          <rule ref="category/apex/errorprone.xml/EmptyCatchBlock" />
+          <rule ref="category/apex/errorprone.xml/EmptyIfStmt" />
+          <rule ref="category/apex/errorprone.xml/EmptyStatementBlock" />
+          
+          <!-- Performance -->
+          <rule ref="category/apex/performance.xml/AvoidDebugStatements" />
+          <rule ref="category/apex/performance.xml/OperationWithLimitsInLoop" />
+          
+          <!-- Security -->
+          <rule ref="category/apex/security.xml/ApexCRUDViolation" />
+          <rule ref="category/apex/security.xml/ApexSOQLInjection" />
+          
+      </ruleset>
+      PMDEOF
+        
+        echo "Default ruleset created at: $RULESET_PATH"
+      else
+        echo "Using existing ruleset: $RULESET_PATH"
+      fi
+      
+      echo ""
+
+- task: Bash@3
+  displayName: 'Run PMD Static Analysis'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== RUNNING PMD ANALYSIS ==="
+      
+      SOURCE_DIR="${{ parameters.sourceDirectory }}"
+      RULESET_PATH="${{ parameters.rulesetPath }}"
+      REPORT_FORMAT="${{ parameters.reportFormat }}"
+      
+      REPORTS_DIR="reports/pmd"
+      mkdir -p "$REPORTS_DIR"
+      REPORT_FILE="$REPORTS_DIR/pmd-report.$REPORT_FORMAT"
+      
+      APEX_COUNT=$(find "$SOURCE_DIR" -name "*.cls" -o -name "*.trigger" 2>/dev/null | wc -l)
+      
+      if [ "$APEX_COUNT" -eq 0 ]; then
+        echo "No Apex files found in $SOURCE_DIR"
+        echo "PMD analysis skipped"
+        echo "No Apex files found for analysis" > "$REPORT_FILE"
+        exit 0
+      fi
+      
+      echo "Found $APEX_COUNT Apex files to analyze"
+      echo "Analyzing code with PMD..."
+      
+      PMD_CMD="$PMD_HOME/pmd"
+      
+      $PMD_CMD check -d "$SOURCE_DIR" -R "$RULESET_PATH" -f "$REPORT_FORMAT" -r "$REPORT_FILE" --no-cache || EXIT_CODE=$?
+      
+      echo "PMD analysis completed"
+      echo "Report saved to: $REPORT_FILE"
+      
+      if [ "$REPORT_FORMAT" == "text" ] && [ -f "$REPORT_FILE" ]; then
+        echo ""
+        echo "=== PMD ANALYSIS RESULTS ==="
+        cat "$REPORT_FILE"
+        echo ""
+      fi
+      
+      if [ "${EXIT_CODE:-0}" -eq 0 ]; then
+        echo "No violations found"
+      elif [ "${EXIT_CODE:-0}" -eq 4 ]; then
+        echo "PMD found violations"
+        if [ "${{ parameters.failOnViolation }}" == "true" ]; then
+          exit 1
+        fi
+      fi
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish PMD Report'
+  condition: always()
+  inputs:
+    PathtoPublish: 'reports/pmd'
+    ArtifactName: 'PMD-Analysis-Report'
+    publishLocation: 'Container'

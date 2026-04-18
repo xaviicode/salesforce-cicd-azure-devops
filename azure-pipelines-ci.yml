@@ -1,0 +1,65 @@
+# ============================================================================
+# CI-FAST PIPELINE - QUICK VALIDATION FOR FEATURE BRANCHES
+# Purpose: Fast feedback for developers on feature branches
+# Trigger: feature/*, hotfix/* (NOT develop or master)
+# Duration: ~5-8 minutes
+# ============================================================================
+
+name: CI-Fast-$(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  branches:
+    include:
+      - feature/*
+      - hotfix/*
+    exclude:
+      - develop
+      - master
+      - main
+  paths:
+    include:
+      - force-app/**
+      - manifest/**
+      - sfdx-project.json
+      
+pr:
+  branches:
+    include:
+      - develop
+      - master
+      - main
+  paths:
+    include:
+      - force-app/**
+      - manifest/**
+      - sfdx-project.json
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - group: Salesforce_CICD_Variables
+
+stages:
+- stage: Setup
+  displayName: 'Setup & Prerequisites'
+  jobs:
+  - template: templates/jobs-setup.yml
+    parameters:
+      agentPool: 'ubuntu-latest'
+      nodeVersion: '18.x'
+      environment: 'dev'
+
+- stage: SetupValidation
+  dependsOn: Setup
+  variables:
+    setupCompleted: $[ stageDependencies.Setup.Setup_Prerequisites.outputs['setupOutputs.setupCompleted'] ]
+    nodeVersion: $[ stageDependencies.Setup.Setup_Prerequisites.outputs['setupOutputs.nodeVersion'] ]
+    sfCliVersion: $[ stageDependencies.Setup.Setup_Prerequisites.outputs['setupOutputs.sfCliVersion'] ]
+  jobs:
+    - template: templates/jobs-validation.yml
+
+- stage: BuildAndPackage
+  dependsOn: SetupValidation
+  jobs:
+    - template: templates/jobs-build.yml

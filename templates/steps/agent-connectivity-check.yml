@@ -1,0 +1,28 @@
+# /templates/steps/agent-connectivity-check.yml
+steps:
+- task: PowerShell@2
+  displayName: 'Validate Agent Connectivity'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== AGENT CONNECTIVITY VALIDATION ==="
+      Write-Host "Agent Name: $(Agent.Name)"
+      Write-Host "Agent OS: $(Agent.OS)"
+      Write-Host "Build Reason: $(Build.Reason)"
+      Write-Host "Source Branch: $(Build.SourceBranchName)"
+      Write-Host "Repository: $(Build.Repository.Name)"
+      
+      # Test internet connectivity
+      try {
+        $sfResponse = Invoke-WebRequest -Uri "https://login.salesforce.com" -Method Head -TimeoutSec 10
+        Write-Host "Salesforce connectivity: OK ($($sfResponse.StatusCode))"
+        
+        $npmResponse = Invoke-WebRequest -Uri "https://registry.npmjs.org" -Method Head -TimeoutSec 10
+        Write-Host "NPM registry connectivity: OK ($($npmResponse.StatusCode))"
+        
+      } catch {
+        Write-Host "External connectivity: FAILED - $($_.Exception.Message)"
+        exit 1
+      }
+      
+      Write-Host "Agent connectivity validated successfully"

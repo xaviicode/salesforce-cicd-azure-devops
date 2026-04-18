@@ -1,0 +1,148 @@
+# /templates/steps/build-summary.yml
+# Generates comprehensive build summary report
+
+parameters:
+- name: buildStage
+  type: string
+  default: 'Build & Compilation'
+
+steps:
+- task: Bash@3
+  displayName: 'Generate Build Summary'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== GENERATING BUILD SUMMARY ==="
+      
+      REPORTS_DIR="reports/build"
+      mkdir -p "$REPORTS_DIR"
+      SUMMARY_FILE="$REPORTS_DIR/build-summary.txt"
+      
+      XML_VALIDATED="${XML_VALIDATED:-0}"
+      XML_ERRORS="${XML_ERRORS:-0}"
+      APEX_COMPILATION="${APEX_COMPILATION:-UNKNOWN}"
+      PACKAGE_VALID="${PACKAGE_VALID:-UNKNOWN}"
+      PACKAGE_TYPES="${PACKAGE_TYPES:-0}"
+      PACKAGE_MEMBERS="${PACKAGE_MEMBERS:-0}"
+      
+      echo "======================================" > "$SUMMARY_FILE"
+      echo "BUILD & COMPILATION SUMMARY" >> "$SUMMARY_FILE"
+      echo "======================================" >> "$SUMMARY_FILE"
+      echo "Build Stage: ${{ parameters.buildStage }}" >> "$SUMMARY_FILE"
+      echo "Generated: $(date -Iseconds)" >> "$SUMMARY_FILE"
+      echo "Build Number: $(Build.BuildNumber)" >> "$SUMMARY_FILE"
+      echo "Branch: $(Build.SourceBranchName)" >> "$SUMMARY_FILE"
+      echo "Commit: $(Build.SourceVersion)" >> "$SUMMARY_FILE"
+      echo "" >> "$SUMMARY_FILE"
+      echo "======================================" >> "$SUMMARY_FILE"
+      echo "METADATA VALIDATION" >> "$SUMMARY_FILE"
+      echo "======================================" >> "$SUMMARY_FILE"
+      echo "XML Files Validated: $XML_VALIDATED" >> "$SUMMARY_FILE"
+      echo "XML Syntax Errors: $XML_ERRORS" >> "$SUMMARY_FILE"
+      
+      if [ "$XML_ERRORS" -eq 0 ]; then
+        echo "Status:  PASSED" >> "$SUMMARY_FILE"
+      else
+        echo "Status:  FAILED" >> "$SUMMARY_FILE"
+      fi
+      
+      echo "" >> "$SUMMARY_FILE"
+      echo "======================================" >> "$SUMMARY_FILE"
+      echo "APEX COMPILATION" >> "$SUMMARY_FILE"
+      echo "======================================" >> "$SUMMARY_FILE"
+      echo "Compilation Status: $APEX_COMPILATION" >> "$SUMMARY_FILE"
+      
+      if [ "$APEX_COMPILATION" == "SUCCESS" ]; then
+        echo "Result:  PASSED" >> "$SUMMARY_FILE"
+      elif [ "$APEX_COMPILATION" == "FAILED" ]; then
+        echo "Result:  FAILED" >> "$SUMMARY_FILE"
+      else
+        echo "Result:  NOT CHECKED" >> "$SUMMARY_FILE"
+      fi
+      
+      echo "" >> "$SUMMARY_FILE"
+      echo "======================================" >> "$SUMMARY_FILE"
+      echo "PACKAGE VALIDATION" >> "$SUMMARY_FILE"
+      echo "======================================" >> "$SUMMARY_FILE"
+      echo "Package.xml Valid: $PACKAGE_VALID" >> "$SUMMARY_FILE"
+      echo "Metadata Types: $PACKAGE_TYPES" >> "$SUMMARY_FILE"
+      echo "Total Members: $PACKAGE_MEMBERS" >> "$SUMMARY_FILE"
+      
+      if [ "$PACKAGE_VALID" == "true" ]; then
+        echo "Status:  PASSED" >> "$SUMMARY_FILE"
+      else
+        echo "Status:  FAILED" >> "$SUMMARY_FILE"
+      fi
+      
+      echo "" >> "$SUMMARY_FILE"
+      echo "======================================" >> "$SUMMARY_FILE"
+      echo "OVERALL BUILD STATUS" >> "$SUMMARY_FILE"
+      echo "======================================" >> "$SUMMARY_FILE"
+      
+      OVERALL_STATUS="SUCCESS"
+      
+      if [ "$XML_ERRORS" -gt 0 ]; then
+        OVERALL_STATUS="FAILED"
+      fi
+      
+      if [ "$APEX_COMPILATION" == "FAILED" ]; then
+        OVERALL_STATUS="FAILED"
+      fi
+      
+      if [ "$PACKAGE_VALID" == "false" ]; then
+        OVERALL_STATUS="FAILED"
+      fi
+      
+      if [ "$OVERALL_STATUS" == "SUCCESS" ]; then
+        echo "BUILD SUCCESSFUL" >> "$SUMMARY_FILE"
+        echo "All validations passed" >> "$SUMMARY_FILE"
+        echo "Code is ready for deployment" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        echo "Checks Performed:" >> "$SUMMARY_FILE"
+        echo "  ✓ XML Syntax Validation" >> "$SUMMARY_FILE"
+        echo "  ✓ Apex Compilation Check" >> "$SUMMARY_FILE"
+        echo "  ✓ Package.xml Validation" >> "$SUMMARY_FILE"
+      else
+        echo " BUILD FAILED" >> "$SUMMARY_FILE"
+        echo "One or more validations failed" >> "$SUMMARY_FILE"
+        echo "Review errors above" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        echo "Failed Checks:" >> "$SUMMARY_FILE"
+        
+        if [ "$XML_ERRORS" -gt 0 ]; then
+          echo "  ✗ XML Syntax Validation" >> "$SUMMARY_FILE"
+        fi
+        
+        if [ "$APEX_COMPILATION" == "FAILED" ]; then
+          echo "  ✗ Apex Compilation" >> "$SUMMARY_FILE"
+        fi
+        
+        if [ "$PACKAGE_VALID" == "false" ]; then
+          echo "  ✗ Package.xml Validation" >> "$SUMMARY_FILE"
+        fi
+      fi
+      
+      echo ""
+      cat "$SUMMARY_FILE"
+      echo ""
+      
+      echo "Build summary saved to: $SUMMARY_FILE"
+      
+      echo "##vso[task.setvariable variable=BUILD_STATUS]$OVERALL_STATUS"
+      
+      if [ "$OVERALL_STATUS" == "FAILED" ]; then
+        echo ""
+        echo "Build validation detected issues"
+        echo "Review the build summary for details"
+      else
+        echo ""
+        echo "Build validation completed successfully"
+      fi
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Build Summary'
+  condition: always()
+  inputs:
+    PathtoPublish: 'reports/build'
+    ArtifactName: 'Build-Summary-Report'
+    publishLocation: 'Container'

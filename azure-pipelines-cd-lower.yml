@@ -1,0 +1,132 @@
+# ============================================================================
+# CD-LOWER PIPELINE - DEVELOPMENT ENVIRONMENTS
+# Purpose: Automatic deployment to DEV and QA environments
+# Trigger: Pipeline dependency on CI-Complete (develop branch)
+# Environments: DEV (auto) → QA (auto)
+# Duration: ~3-5 minutes
+# ============================================================================
+
+name: CD-Lower-$(Date:yyyyMMdd)$(Rev:.r)
+
+# ============================================================================
+# TRIGGER CONFIGURATION
+# ============================================================================
+trigger: none  # Triggered by CI-Complete pipeline
+
+resources:
+  pipelines:
+    - pipeline: CI_Complete
+      source: 'CI-Complete'
+      trigger:
+        branches:
+          include:
+            - develop
+
+# ============================================================================
+# VARIABLES.
+# ============================================================================
+variables:
+  - group: Salesforce_CICD_Variables
+
+  # DEV Environment (Persistent Scratch Org)
+  - name: devUsername
+    value: '$(DEV_Username)'
+  - name: devInstanceUrl
+    value: '$(DEV_Instance_URL)'
+  - name: devOrgAlias
+    value: 'persistent-dev'
+  - name: devClientId
+    value: '$(DEV_Client_ID)'
+
+  # QA Environment (Persistent Scratch Org)
+  - name: qaUsername
+    value: '$(QA_Username)'
+  - name: qaInstanceUrl
+    value: '$(QA_Instance_URL)'
+  - name: qaOrgAlias
+    value: 'persistent-qa'
+  - name: qaClientId
+    value: '$(QA_Client_ID)'
+
+# ============================================================================
+# STAGES
+# ============================================================================
+stages:
+  # ==========================================================================
+  # STAGE 1: DEPLOY TO DEV (Automatic)
+  # ==========================================================================
+  - stage: Deploy_DEV
+    displayName: 'Deploy to DEV Environment'
+    condition: succeeded()
+    jobs:
+      - template: templates/cd/jobs-environment-deployment.yml
+        parameters:
+          environmentName: 'DEV'
+          orgUsername: $(devUsername)
+          orgInstanceUrl: $(devInstanceUrl)
+          orgAlias: $(devOrgAlias)
+          coverageThreshold: 75
+          clientId: $(devClientId)
+
+  # ==========================================================================
+  # STAGE 2: DEPLOY TO QA (Automatic after DEV success)
+  # ==========================================================================
+  - stage: Deploy_QA
+    displayName: 'Deploy to QA Environment'
+    dependsOn: Deploy_DEV
+    condition: succeeded()
+    jobs:
+      - template: templates/cd/jobs-environment-deployment.yml
+        parameters:
+          environmentName: 'QA'
+          orgUsername: $(qaUsername)
+          orgInstanceUrl: $(qaInstanceUrl)
+          orgAlias: $(qaOrgAlias)
+          coverageThreshold: 75
+          clientId: $(qaClientId)
+
+  # ==========================================================================
+  # STAGE 3: SUMMARY
+  # ==========================================================================
+  - stage: Summary
+    displayName: 'Deployment Summary'
+    dependsOn:
+      - Deploy_DEV
+      - Deploy_QA
+    condition: always()
+    jobs:
+      - job: GenerateSummary
+        displayName: 'Generate Deployment Report'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: Bash@3
+            displayName: 'Lower Environments Deployment Summary'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "============================================"
+                echo "CD-LOWER DEPLOYMENT SUMMARY"
+                echo "============================================"
+                echo ""
+                echo "Pipeline: $(Build.DefinitionName)"
+                echo "Build Number: $(Build.BuildNumber)"
+                echo "Triggered By: CI-Complete (develop branch)"
+                echo "Branch: $(Build.SourceBranchName)"
+                echo "Commit: $(Build.SourceVersion)"
+                echo ""
+                echo "Environments Deployed:"
+                echo "  ✅ DEV:  $(devOrgAlias) - $(devUsername)"
+                echo "  ✅ QA:   $(qaOrgAlias) - $(qaUsername)"
+                echo ""
+                echo "Next Steps:"
+                echo "  1. QA Team can begin testing in QA environment"
+                echo "  2. After QA approval, merge to master for UAT/PROD"
+                echo ""
+                echo "Environment Renewal Reminder:"
+                echo "  • Scratch Orgs (DEV/QA) expire: 2026-02-12"
+                echo "  • Run renewal script 2 days before expiration"
+                echo ""
+                echo "============================================"
+                echo "CD-LOWER PIPELINE COMPLETE"
+                echo "============================================"

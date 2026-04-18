@@ -1,0 +1,65 @@
+# /templates/steps/project-structure-validation.yml
+steps:
+- task: PowerShell@2
+  displayName: 'Validate Project Structure'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== PROJECT STRUCTURE VALIDATION ==="
+      Write-Host "Validating from: $(Build.SourcesDirectory)"
+      
+      # Cambiar al directorio de sources si no estamos ahí
+      Set-Location $(Build.SourcesDirectory)
+      
+      $validationErrors = 0
+      
+      # Archivos críticos del proyecto
+      $criticalFiles = @(
+        @{Path='sfdx-project.json'; Type='File'; Required=$true},
+        @{Path='force-app'; Type='Directory'; Required=$true},
+        @{Path='manifest'; Type='Directory'; Required=$true},
+        @{Path='.azure'; Type='Directory'; Required=$true},
+        @{Path='templates'; Type='Directory'; Required=$true}
+      )
+      
+      foreach ($item in $criticalFiles) {
+        $fullPath = Join-Path $(Build.SourcesDirectory) $item.Path
+        
+        if ($item.Type -eq 'File') {
+          $exists = Test-Path -Path $fullPath -PathType Leaf
+        } else {
+          $exists = Test-Path -Path $fullPath -PathType Container
+        }
+        
+        if ($exists) {
+          Write-Host "Found $($item.Type): $($item.Path)"
+        } else {
+          if ($item.Required) {
+            Write-Host " Missing required $($item.Type): $($item.Path)"
+            $validationErrors++
+          } else {
+            Write-Host "Optional $($item.Type) missing: $($item.Path)"
+          }
+        }
+      }
+      
+      # Validar sfdx-project.json específicamente
+      $sfdxPath = Join-Path $(Build.SourcesDirectory) 'sfdx-project.json'
+      if (Test-Path $sfdxPath) {
+        try {
+          $sfdxProject = Get-Content $sfdxPath | ConvertFrom-Json
+          Write-Host " SFDX Project Name: $($sfdxProject.name)"
+          Write-Host " Package Directories: $($sfdxProject.packageDirectories.Count)"
+          Write-Host " Source API Version: $($sfdxProject.sourceApiVersion)"
+        } catch {
+          Write-Host " Invalid sfdx-project.json format: $($_.Exception.Message)"
+          $validationErrors++
+        }
+      }
+      
+      if ($validationErrors -gt 0) {
+        Write-Host " $validationErrors project structure errors found"
+        exit 1
+      }
+      
+      Write-Host " Project structure validated successfully"

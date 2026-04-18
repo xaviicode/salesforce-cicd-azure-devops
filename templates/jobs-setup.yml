@@ -1,0 +1,90 @@
+
+# /templates/jobs-setup.yml
+parameters:
+- name: agentPool
+  type: string
+  default: 'ubuntu-latest'
+- name: nodeVersion
+  type: string
+  default: '18.x'
+- name: environment
+  type: string
+  default: 'dev'
+
+jobs:
+
+- job: Setup_Prerequisites
+  displayName: 'Setup & Prerequisites'
+  pool:
+    vmImage: ${{ parameters.agentPool }}
+  
+  variables:
+  - group: Salesforce_CICD_Variables
+
+  steps:
+  # Checkout explícito
+  - checkout: self
+    displayName: 'Checkout Repository'
+    clean: true
+    fetchDepth: 0  # Cambiado a 0 para descargar todo
+    persistCredentials: true
+
+  # NUEVO: Debug completo del checkout
+  - task: PowerShell@2
+    displayName: 'DEBUG - Verify Checkout Status'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "=== CHECKOUT DEBUG INFORMATION ==="
+        Write-Host "Build.SourcesDirectory: $(Build.SourcesDirectory)"
+        Write-Host "System.DefaultWorkingDirectory: $(System.DefaultWorkingDirectory)"
+        Write-Host "Agent.BuildDirectory: $(Agent.BuildDirectory)"
+        Write-Host ""
+        
+        Write-Host "=== CURRENT LOCATION ==="
+        Write-Host "PWD: $(Get-Location)"
+        Write-Host ""
+        
+        Write-Host "=== DIRECTORY CONTENTS (Build.SourcesDirectory) ==="
+        if (Test-Path "$(Build.SourcesDirectory)") {
+          Get-ChildItem -Path "$(Build.SourcesDirectory)" -Force | ForEach-Object {
+            Write-Host "  $($_.Name) [$($_.PSIsContainer ? 'DIR' : 'FILE')]"
+          }
+        } else {
+          Write-Host " Build.SourcesDirectory does not exist!"
+        }
+        
+        Write-Host ""
+        Write-Host "=== GIT STATUS ==="
+        Set-Location "$(Build.SourcesDirectory)"
+        git status
+        git log -1 --oneline
+        
+        Write-Host ""
+        Write-Host "=== RECURSIVE FILE LISTING (Top 20) ==="
+        Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -File | Select-Object -First 20 | ForEach-Object {
+          Write-Host "  $($_.FullName)"
+        }
+  
+  # Step 1: Validar conectividad del agente
+  - template: steps/agent-connectivity-check.yml
+
+  # Step 2: Setup herramientas base
+  - template: steps/tools-installation.yml
+    parameters:
+      nodeVersion: ${{ parameters.nodeVersion }}
+
+  # Step 3: Validar variables y seguridad
+  - template: steps/environment-validation.yml
+    parameters:
+      environment: ${{ parameters.environment }}
+
+  # Step 4: Validar estructura del proyecto
+  - template: steps/project-structure-validation.yml
+
+  # Step 5: Configurar Git y directorios de trabajo
+  - template: steps/workspace-preparation.yml
+
+  # Step 6: Resumen del setup
+  - template: steps/setup-summary.yml
+

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <!-- Apex Classes -->
+    <types>
+        <members>*</members>
+        <name>ApexClass</name>
+    </types>
+    
+    <!-- Apex Triggers -->
+    <types>
+        <members>*</members>
+        <name>ApexTrigger</name>
+    </types>
+    
+    <!-- Custom Objects -->
+    <types>
+        <members>Account</members>
+        <name>CustomObject</name>
+    </types>
+    
+    <!-- Custom Fields -->
+    <types>
+        <members>Account.Active__c</members>
+        <name>CustomField</name>
+    </types>
+    
+    <!-- Lightning Web Components -->
+    <types>
+        <members>*</members>
+        <name>LightningComponentBundle</name>
+    </types>
+    
+    <!-- Aura Components -->
+    <types>
+        <members>*</members>
+        <name>AuraDefinitionBundle</name>
+    </types>
+    
+    <!-- Apex Pages -->
+    <types>
+        <members>*</members>
+        <name>ApexPage</name>
+    </types>
+    
+    <!-- Static Resources -->
+    <types>
+        <members>*</members>
+        <name>StaticResource</name>
+    </types>
+    
+    <!-- Flows -->
+    <types>
+        <members>*</members>
+        <name>Flow</name>
+    </types>
+    
+    <version>60.0</version>
+</Package>

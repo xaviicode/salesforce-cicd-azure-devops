@@ -1,0 +1,222 @@
+# templates/quality/quality-report-generator.yml
+# Quality Report Generator Template
+# Generates quality reports in SonarQube-compatible format
+
+parameters:
+- name: metricsFile
+  type: string
+  default: '$(Build.ArtifactStagingDirectory)/quality-reports/metrics.json'
+- name: gateResultsFile
+  type: string
+  default: '$(Build.ArtifactStagingDirectory)/quality-reports/gate-results.json'
+- name: outputFile
+  type: string
+  default: '$(Build.ArtifactStagingDirectory)/quality-reports/sonar-report.json'
+
+steps:
+- script: |
+    echo "================================================"
+    echo "QUALITY REPORT GENERATION (SONARQUBE FORMAT)"
+    echo "================================================"
+    echo "Metrics File: ${{ parameters.metricsFile }}"
+    echo "Gate Results: ${{ parameters.gateResultsFile }}"
+    echo "Output File: ${{ parameters.outputFile }}"
+    echo ""
+    
+    METRICS_FILE="${{ parameters.metricsFile }}"
+    GATE_FILE="${{ parameters.gateResultsFile }}"
+    OUTPUT_FILE="${{ parameters.outputFile }}"
+    
+    if [ ! -f "$METRICS_FILE" ]; then
+      echo "[ERROR] Metrics file not found"
+      exit 1
+    fi
+    
+    if [ ! -f "$GATE_FILE" ]; then
+      echo "[ERROR] Gate results file not found"
+      exit 1
+    fi
+    
+    echo "Generating SonarQube-compatible quality report..."
+    
+    safe_extract() {
+      local path=$1
+      local default=${2:-0}
+      local value=$(cat $METRICS_FILE | jq -r "$path // \"$default\"" 2>/dev/null)
+      if [[ "$value" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+        echo "$value"
+      else
+        echo "$default"
+      fi
+    }
+    
+    echo "Extracting metrics from $METRICS_FILE..."
+    
+    COVERAGE=$(safe_extract '.metrics.coverage.percentage' '0')
+    TESTS_RAN=$(safe_extract '.metrics.coverage.testsRan' '0')
+    TESTS_PASSING=$(safe_extract '.metrics.coverage.passing' '0')
+    TESTS_FAILING=$(safe_extract '.metrics.coverage.failing' '0')
+    SECURITY_VIOLATIONS=$(safe_extract '.metrics.security.totalViolations' '0')
+    CRITICAL_SECURITY=$(safe_extract '.metrics.security.criticalIssues' '0')
+    SECURITY_SCORE=$(safe_extract '.metrics.security.securityScore' '0')
+    TECH_DEBT=$(safe_extract '.metrics.technicalDebt.estimatedHours' '0')
+    APEX_LOC=$(safe_extract '.metrics.technicalDebt.apexLinesOfCode' '0')
+    APEX_CLASSES=$(safe_extract '.metrics.technicalDebt.apexClasses' '0')
+    OVERALL_STATUS=$(cat $GATE_FILE | jq -r '.overallStatus // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
+    PASSED_GATES=$(safe_extract '.summary.passedGates' '0')
+    FAILED_GATES=$(safe_extract '.summary.failedGates' '0')
+    TOTAL_GATES=$(safe_extract '.summary.totalGates' '4')
+    
+    echo ""
+    echo "Report Metrics:"
+    echo "  Coverage: ${COVERAGE}%"
+    echo "  Tests: $TESTS_RAN (${TESTS_PASSING} passing, ${TESTS_FAILING} failing)"
+    echo "  Security Score: ${SECURITY_SCORE}/100"
+    echo "  Technical Debt: ${TECH_DEBT} hours"
+    echo "  Lines of Code: $APEX_LOC"
+    echo "  Quality Gates: ${PASSED_GATES}/${TOTAL_GATES} passed"
+    
+    if [ "$TESTS_RAN" -gt 0 ]; then
+      TEST_SUCCESS=$(echo "scale=2; ($TESTS_PASSING * 100) / $TESTS_RAN" | bc 2>/dev/null || echo "0")
+    else
+      TEST_SUCCESS="0"
+    fi
+    
+    if [ "$APEX_LOC" -gt 0 ]; then
+      DEBT_RATIO=$(echo "scale=2; ($TECH_DEBT * 100) / $APEX_LOC" | bc 2>/dev/null || echo "0")
+    else
+      DEBT_RATIO="0"
+    fi
+    
+    if [ "$CRITICAL_SECURITY" -eq 0 ]; then
+      SECURITY_RATING="A"
+    else
+      SECURITY_RATING="C"
+    fi
+    
+    DEBT_CHECK=$(echo "$TECH_DEBT < 50" | bc 2>/dev/null || echo "0")
+    if [ "$DEBT_CHECK" -eq 1 ]; then
+      SQALE_RATING="A"
+    else
+      SQALE_RATING="C"
+    fi
+    
+    MAINT_CHECK=$(echo "$TECH_DEBT < 100" | bc 2>/dev/null || echo "0")
+    if [ "$MAINT_CHECK" -eq 1 ]; then
+      MAINT_RATING="A"
+    else
+      MAINT_RATING="C"
+    fi
+    
+    SQALE_INDEX=$(echo "$TECH_DEBT * 60" | bc 2>/dev/null || echo "0")
+    ESTIMATED_FUNCTIONS=$(echo "$APEX_CLASSES * 5" | bc 2>/dev/null || echo "0")
+    
+    jq -n \
+      --arg projectKey "salesforce-cicd" \
+      --arg projectName "Salesforce CI/CD Pipeline" \
+      --arg projectVersion "$(Build.BuildNumber)" \
+      --arg sourceEncoding "UTF-8" \
+      --arg sources "force-app/main/default" \
+      --arg buildDate "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+      --arg scmProvider "git" \
+      --arg scmBranch "$(Build.SourceBranchName)" \
+      --arg scmRevision "$(Build.SourceVersion)" \
+      --argjson coverage "$COVERAGE" \
+      --argjson testsRan "$TESTS_RAN" \
+      --argjson testSuccess "$TEST_SUCCESS" \
+      --argjson testsFailing "$TESTS_FAILING" \
+      --argjson apexLoc "$APEX_LOC" \
+      --argjson apexClasses "$APEX_CLASSES" \
+      --argjson estFunctions "$ESTIMATED_FUNCTIONS" \
+      --argjson secViolations "$SECURITY_VIOLATIONS" \
+      --argjson critSecurity "$CRITICAL_SECURITY" \
+      --arg secRating "$SECURITY_RATING" \
+      --argjson sqaleIndex "$SQALE_INDEX" \
+      --arg sqaleRating "$SQALE_RATING" \
+      --arg techDebt "$TECH_DEBT" \
+      --argjson debtRatio "$DEBT_RATIO" \
+      --arg maintRating "$MAINT_RATING" \
+      --arg overallStatus "$OVERALL_STATUS" \
+      --arg covStatus "$(cat $GATE_FILE | jq -r '.gates.coverage.status // "UNKNOWN"')" \
+      --arg covThreshold "$(cat $GATE_FILE | jq -r '.gates.coverage.threshold // "0"')" \
+      --arg secStatus "$(cat $GATE_FILE | jq -r '.gates.security.status // "UNKNOWN"')" \
+      --arg secThreshold "$(cat $GATE_FILE | jq -r '.gates.security.threshold // "0"')" \
+      --arg debtStatus "$(cat $GATE_FILE | jq -r '.gates.technicalDebt.status // "UNKNOWN"')" \
+      --arg debtThreshold "$(cat $GATE_FILE | jq -r '.gates.technicalDebt.threshold // "0"')" \
+      --argjson totalGates "$TOTAL_GATES" \
+      --argjson passedGates "$PASSED_GATES" \
+      --argjson failedGates "$FAILED_GATES" \
+      '{
+        projectKey: $projectKey,
+        projectName: $projectName,
+        projectVersion: $projectVersion,
+        sourceEncoding: $sourceEncoding,
+        sources: $sources,
+        buildDate: $buildDate,
+        scm: {
+          provider: $scmProvider,
+          branch: $scmBranch,
+          revision: $scmRevision
+        },
+        measures: {
+          coverage: $coverage,
+          line_coverage: $coverage,
+          tests: $testsRan,
+          test_success_density: $testSuccess,
+          test_failures: $testsFailing,
+          lines: $apexLoc,
+          ncloc: $apexLoc,
+          classes: $apexClasses,
+          files: $apexClasses,
+          functions: $estFunctions,
+          violations: $secViolations,
+          critical_violations: $critSecurity,
+          security_rating: $secRating,
+          sqale_index: $sqaleIndex,
+          sqale_rating: $sqaleRating,
+          technical_debt: $techDebt,
+          technical_debt_ratio: $debtRatio,
+          reliability_rating: "A",
+          maintainability_rating: $maintRating
+        },
+        qualityGateStatus: {
+          status: $overallStatus,
+          conditions: {
+            coverage: {
+              status: $covStatus,
+              actual: $coverage,
+              threshold: ($covThreshold | tonumber)
+            },
+            security: {
+              status: $secStatus,
+              criticalIssues: $critSecurity,
+              threshold: ($secThreshold | tonumber)
+            },
+            technicalDebt: {
+              status: $debtStatus,
+              estimatedHours: $techDebt,
+              threshold: ($debtThreshold | tonumber)
+            }
+          },
+          summary: {
+            totalGates: $totalGates,
+            passedGates: $passedGates,
+            failedGates: $failedGates
+          }
+        },
+        issues: {
+          total: $secViolations,
+          critical: $critSecurity,
+          major: 0,
+          minor: 0,
+          info: 0
+        }
+      }' > $OUTPUT_FILE
+    
+    echo ""
+    echo "[SUCCESS] SonarQube-format report generated successfully"
+    echo ""
+    echo "Generated Report:"
+    cat $OUTPUT_FILE | jq '.'
+  displayName: 'Generate Quality Report (SonarQube Format)'
+  continueOnError: true

@@ -1,0 +1,106 @@
+# /templates/steps/metadata-retrieve.yml
+parameters:
+- name: targetOrg
+  type: string
+  default: 'cicd-org'
+- name: outputDir
+  type: string
+  default: 'force-app'
+- name: manifestPath
+  type: string
+  default: 'manifest/allMetadata.xml'
+
+steps:
+- task: Bash@3
+  displayName: 'Retrieve Metadata from Org'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== RETRIEVING METADATA FROM SALESFORCE ==="
+      
+      TARGET_ORG="${{ parameters.targetOrg }}"
+      MANIFEST_PATH="${{ parameters.manifestPath }}"
+      OUTPUT_DIR="${{ parameters.outputDir }}"
+      
+      echo "Target Org: $TARGET_ORG"
+      echo "Manifest: $MANIFEST_PATH"
+      echo "Output Directory: $OUTPUT_DIR"
+      echo ""
+      
+      if [ ! -f "$MANIFEST_PATH" ]; then
+        echo "Error: Manifest file not found at $MANIFEST_PATH"
+        echo "Please ensure allMetadata.xml exists in the manifest directory"
+        exit 1
+      fi
+      
+      echo "Using manifest file for retrieval..."
+      echo "Manifest contains $(grep -c '<members>' "$MANIFEST_PATH") metadata items"
+      echo ""
+      
+      sf project retrieve start \
+        --manifest "$MANIFEST_PATH" \
+        --target-org "$TARGET_ORG" \
+        --wait 15
+   
+      
+      RETRIEVE_RESULT=$?
+      
+      if [ $RETRIEVE_RESULT -eq 0 ]; then
+        echo ""
+        echo "Metadata retrieved successfully"
+        echo "##vso[task.setvariable variable=METADATA_RETRIEVED]SUCCESS"
+      else
+        echo ""
+        echo "Metadata retrieval completed with exit code: $RETRIEVE_RESULT"
+        
+        if [ $RETRIEVE_RESULT -eq 1 ]; then
+          echo "Some metadata may not exist in the org"
+          echo "This is normal for a new org"
+          echo "##vso[task.setvariable variable=METADATA_RETRIEVED]PARTIAL"
+        else
+          echo "##vso[task.setvariable variable=METADATA_RETRIEVED]FAILED"
+          exit 1
+        fi
+      fi
+
+- task: Bash@3
+  displayName: 'Validate Retrieved Metadata'
+  condition: or(eq(variables['METADATA_RETRIEVED'], 'SUCCESS'), eq(variables['METADATA_RETRIEVED'], 'PARTIAL'))
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== VALIDATING RETRIEVED METADATA ==="
+      
+      OUTPUT_DIR="${{ parameters.outputDir }}"
+      
+      if [ ! -d "$OUTPUT_DIR" ]; then
+        echo "Output directory not found: $OUTPUT_DIR"
+        echo "No metadata was retrieved (org may be empty)"
+        echo "##vso[task.setvariable variable=METADATA_VALID]false"
+        exit 0
+      fi
+      
+      APEX_COUNT=$(find "$OUTPUT_DIR" -name "*.cls" 2>/dev/null | wc -l)
+      TRIGGER_COUNT=$(find "$OUTPUT_DIR" -name "*.trigger" 2>/dev/null | wc -l)
+      LWC_COUNT=$(find "$OUTPUT_DIR" -type d -name "lwc" 2>/dev/null | wc -l)
+      OBJECT_COUNT=$(find "$OUTPUT_DIR" -name "*.object-meta.xml" 2>/dev/null | wc -l)
+      FIELD_COUNT=$(find "$OUTPUT_DIR" -name "*.field-meta.xml" 2>/dev/null | wc -l)
+      
+      echo "Metadata Summary:"
+      echo "  - Apex Classes: $APEX_COUNT"
+      echo "  - Apex Triggers: $TRIGGER_COUNT"
+      echo "  - LWC Components: $LWC_COUNT"
+      echo "  - Custom Objects: $OBJECT_COUNT"
+      echo "  - Custom Fields: $FIELD_COUNT"
+      echo ""
+      
+      TOTAL_FILES=$((APEX_COUNT + TRIGGER_COUNT + OBJECT_COUNT + FIELD_COUNT))
+      
+      if [ $TOTAL_FILES -gt 0 ]; then
+        echo "Validation: PASS ($TOTAL_FILES metadata files retrieved)"
+        echo "##vso[task.setvariable variable=METADATA_VALID]true"
+      else
+        echo "Info: No code metadata retrieved"
+        echo "Org may only have standard objects/fields"
+        echo "##vso[task.setvariable variable=METADATA_VALID]false"
+      fi

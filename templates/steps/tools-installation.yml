@@ -1,0 +1,50 @@
+# /templates/steps/tools-installation.yml
+parameters:
+- name: nodeVersion
+  type: string
+  default: '18.x'
+
+steps:
+- task: NodeTool@0
+  displayName: 'Setup Node.js ${{ parameters.nodeVersion }}'
+  inputs:
+    versionSpec: '${{ parameters.nodeVersion }}'
+    checkLatest: true
+
+- task: PowerShell@2
+  displayName: 'Install Salesforce CLI'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== INSTALLING SALESFORCE CLI ==="
+      
+      # Limpiar cache NPM por si hay conflictos
+      npm cache clean --force
+      
+      # Instalar SF CLI
+      npm install -g @salesforce/cli@latest
+      
+      # Verificar instalación
+      Write-Host "=== CLI VERIFICATION ==="
+      sf version --verbose
+      sf plugins --core
+      
+      # Verificar plugins críticos
+      $plugins = sf plugins --json | ConvertFrom-Json
+      $corePlugins = $plugins.plugins | Where-Object { $_.name -like "*source*" -or $_.name -like "*auth*" }
+      
+      Write-Host "Core plugins available:"
+      foreach ($plugin in $corePlugins) {
+        Write-Host "  - $($plugin.name): $($plugin.version)"
+      }
+
+- task: PowerShell@2
+  displayName: 'Verify Tool Versions'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== TOOL VERSIONS ==="
+      Write-Host "Node.js: $(node --version)"
+      Write-Host "NPM: $(npm --version)"
+      Write-Host "Git: $(git --version)"
+      sf version --json | ConvertFrom-Json | ConvertTo-Json -Depth 3

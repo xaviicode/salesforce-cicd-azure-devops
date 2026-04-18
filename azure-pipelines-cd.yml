@@ -1,0 +1,379 @@
+# ============================================================================
+# CD-UPPER PIPELINE - PRODUCTION-LIKE ENVIRONMENTS
+# Purpose: Controlled deployment to UAT and PROD with approval gates
+# Trigger: Pipeline dependency on CI-Complete (master branch)
+# Environments: UAT (approval) → PROD (approval)
+# Duration: ~6-10 minutes (+ approval waiting time)
+# Note: DEV and QA deployments are handled by CD-Lower pipeline
+# ============================================================================
+
+name: CD-Upper-$(Date:yyyyMMdd)$(Rev:.r)
+
+# ============================================================================
+# TRIGGER CONFIGURATION
+# ============================================================================
+trigger: none  # CD is triggered by CI pipeline completion, not by commits
+resources:
+  pipelines:
+    - pipeline: CI_Complete
+      source: 'CI-Complete'  # Name of your CI pipeline
+      trigger:
+        branches:
+          include:
+            - master
+            - main
+
+# ============================================================================
+# VARIABLES
+# ============================================================================
+variables:
+  - group: Salesforce_CICD_Variables
+  
+  # UAT Environment (Persistent Scratch Org)
+  - name: uatUsername
+    value: '$(UAT_Username)'
+  - name: uatInstanceUrl
+    value: '$(UAT_Instance_URL)'
+  - name: uatOrgAlias
+    value: 'persistent-uat'
+  - name: uatClientId   #<- agredar esta línea
+    value: '$(UAT_Client_ID)' #<- agredar esta línea
+  
+  # PROD Environment (Developer Edition)
+  - name: prodUsername
+    value: '$(PROD_Username)'
+  - name: prodInstanceUrl
+    value: '$(PROD_Instance_URL)'
+  - name: prodOrgAlias
+    value: 'persistent-prod'
+  
+  # Shared Variables
+  - name: clientId
+    value: '$(Salesforce_Client_ID)'
+
+# ============================================================================
+# STAGES
+# ============================================================================
+stages:
+
+  # ==========================================================================
+  # STAGE 1: DEPLOY TO UAT (Manual Approval Required)
+  # ==========================================================================
+  - stage: Deploy_UAT
+    displayName: 'Deploy to UAT Environment - APPROVAL REQUIRED'
+    condition: succeeded()
+    jobs:
+      - deployment: DeployToUAT
+        displayName: 'UAT Environment Deployment'
+        environment: UAT  # Triggers approval gate configured in Environments
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # Checkout repository
+                - checkout: self
+                
+                # Download JWT Key
+                - task: DownloadSecureFile@1
+                  name: downloadJWTKey
+                  displayName: 'Download JWT Key'
+                  inputs:
+                    secureFile: 'server.key'
+
+                - task: Bash@3
+                  displayName: 'Copy JWT Key to Temp'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      cp $(downloadJWTKey.secureFilePath) $(Agent.TempDirectory)/server.key
+                      chmod 600 $(Agent.TempDirectory)/server.key
+                      echo "JWT key ready"
+
+                - task: Bash@3
+                  displayName: 'Install Salesforce CLI'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "Installing Salesforce CLI..."
+                      npm install -g @salesforce/cli
+                      sf version
+
+                # Authenticate to UAT
+                - template: templates/cd/steps/authenticate-to-org.yml
+                  parameters:
+                    orgUsername: $(uatUsername)
+                    orgAlias: $(uatOrgAlias)
+                    clientId: $(uatClientId) #<- Linea Cambiada
+                    jwtKeyFile: '$(Agent.TempDirectory)/server.key'
+                    instanceUrl: $(uatInstanceUrl)
+
+                # Deploy to UAT
+                - template: templates/cd/steps/deploy-to-org.yml
+                  parameters:
+                    orgAlias: $(uatOrgAlias)
+                    manifestPath: 'manifest/package-scratch-org.xml'
+                    testLevel: 'NoTestRun'
+
+                # Test UAT
+                - template: templates/cd/steps/test-org.yml
+                  parameters:
+                    orgAlias: $(uatOrgAlias)
+                    coverageThreshold: 75
+                    testLevel: 'RunLocalTests'
+
+  # ==========================================================================
+  # STAGE 2: DEPLOY TO PROD (Manual Approval Required)
+  # ==========================================================================
+  - stage: Deploy_PROD
+    displayName: 'Deploy to PROD - APPROVAL REQUIRED'
+    dependsOn: Deploy_UAT
+    condition: succeeded()
+    jobs:
+      - deployment: DeployToPROD
+        displayName: 'PROD Environment Deployment'
+        environment: PROD  # Triggers approval gate configured in Environments
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # Checkout repository
+                - checkout: self
+                
+                # Download JWT Key
+                - task: DownloadSecureFile@1
+                  name: downloadJWTKey
+                  displayName: 'Download JWT Key'
+                  inputs:
+                    secureFile: 'server.key'
+
+                - task: Bash@3
+                  displayName: 'Copy JWT Key to Temp'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      cp $(downloadJWTKey.secureFilePath) $(Agent.TempDirectory)/server.key
+                      chmod 600 $(Agent.TempDirectory)/server.key
+                      echo "JWT key ready"
+
+                - task: Bash@3
+                  displayName: 'Install Salesforce CLI'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "Installing Salesforce CLI..."
+                      npm install -g @salesforce/cli
+                      sf version
+
+                # Authenticate to PROD
+                - task: Bash@3
+                  displayName: 'Authenticate to PROD'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "============================================"
+                      echo "AUTHENTICATING TO PROD"
+                      echo "============================================"
+                      echo "Username: $(prodUsername)"
+                      echo "Instance: $(prodInstanceUrl)"
+                      echo ""
+                      
+                      sf org login jwt \
+                        --client-id "$(clientId)" \
+                        --jwt-key-file "$(Agent.TempDirectory)/server.key" \
+                        --username "$(prodUsername)" \
+                        --instance-url "$(prodInstanceUrl)" \
+                        --set-default \
+                        --alias $(prodOrgAlias)
+                      
+                      echo ""
+                      echo "Verifying connection..."
+                      sf org display --target-org $(prodOrgAlias)
+                      
+                      echo ""
+                      echo "[SUCCESS] PROD authentication complete"
+
+                # Validate Deployment
+                - task: Bash@3
+                  displayName: 'Validate Deployment to PROD (Dry-Run)'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "============================================"
+                      echo "VALIDATING DEPLOYMENT TO PROD"
+                      echo "============================================"
+                      echo "Strategy: Validate-only (dry-run)"
+                      echo "Target: $(prodOrgAlias)"
+                      echo "Test Level: RunLocalTests"
+                      echo ""
+                      
+                      sf project deploy start \
+                        --manifest manifest/package-scratch-org.xml \
+                        --target-org $(prodOrgAlias) \
+                        --test-level RunLocalTests \
+                        --dry-run \
+                        --wait 30 \
+                        --verbose
+                      
+                      VALIDATION_EXIT_CODE=$?
+                      
+                      if [ $VALIDATION_EXIT_CODE -eq 0 ]; then
+                        echo ""
+                        echo "[SUCCESS] Validation passed - Ready for deployment"
+                        
+                        # Get validation ID for quick deploy
+                        VALIDATION_ID=$(sf project deploy report --target-org $(prodOrgAlias) --json | jq -r '.result.id' 2>/dev/null || echo "")
+                        
+                        if [ -n "$VALIDATION_ID" ]; then
+                          echo "Validation ID: $VALIDATION_ID"
+                          echo "##vso[task.setvariable variable=VALIDATION_ID;isOutput=true]$VALIDATION_ID"
+                        else
+                          echo "[WARNING] Could not extract validation ID"
+                        fi
+                      else
+                        echo ""
+                        echo "[ERROR] Validation failed - Deployment cannot proceed"
+                        sf project deploy report --target-org $(prodOrgAlias) --verbose || true
+                        exit 1
+                      fi
+
+                # Quick Deploy
+                - task: Bash@3
+                  displayName: 'Quick Deploy to PROD'
+                  condition: succeeded()
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "============================================"
+                      echo "QUICK DEPLOYING TO PROD"
+                      echo "============================================"
+                      
+                      if [ -n "$(VALIDATION_ID)" ]; then
+                        echo "Using validation ID: $(VALIDATION_ID)"
+                        echo ""
+                        
+                        sf project deploy quick \
+                          --job-id "$(VALIDATION_ID)" \
+                          --target-org $(prodOrgAlias) \
+                          --wait 30
+                        
+                        DEPLOY_EXIT_CODE=$?
+                        
+                        if [ $DEPLOY_EXIT_CODE -eq 0 ]; then
+                          echo ""
+                          echo "[SUCCESS] Deployment to PROD completed successfully"
+                        else
+                          echo ""
+                          echo "[ERROR] Deployment to PROD failed"
+                          sf project deploy report --target-org $(prodOrgAlias) --verbose || true
+                          exit 1
+                        fi
+                      else
+                        echo "[WARNING] No validation ID found"
+                        echo "Proceeding with standard deployment..."
+                        echo ""
+                        
+                        sf project deploy start \
+                          --manifest manifest/package-scratch-org.xml \
+                          --target-org $(prodOrgAlias) \
+                          --test-level RunLocalTests \
+                          --wait 30 \
+                          --verbose
+                        
+                        if [ $? -eq 0 ]; then
+                          echo ""
+                          echo "[SUCCESS] Standard deployment completed"
+                        else
+                          echo ""
+                          echo "[ERROR] Standard deployment failed"
+                          exit 1
+                        fi
+                      fi
+
+                # Verify Deployment
+                - task: Bash@3
+                  displayName: 'Verify PROD Deployment'
+                  condition: succeeded()
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "============================================"
+                      echo "VERIFYING PROD DEPLOYMENT"
+                      echo "============================================"
+                      
+                      sf project deploy report --target-org $(prodOrgAlias) --verbose
+                      
+                      echo ""
+                      echo "[SUCCESS] PROD deployment verified successfully"
+
+  # ==========================================================================
+  # STAGE 3: POST-DEPLOYMENT SUMMARY
+  # ==========================================================================
+  - stage: Summary
+    displayName: 'Deployment Summary'
+    dependsOn:
+      - Deploy_UAT
+      - Deploy_PROD
+    condition: always()
+    jobs:
+      - job: GenerateSummary
+        displayName: 'Generate Deployment Report'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: Bash@3
+            displayName: 'Deployment Summary Report'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "============================================"
+                echo "CONTINUOUS DEPLOYMENT SUMMARY"
+                echo "============================================"
+                echo ""
+                echo "Pipeline: $(Build.DefinitionName)"
+                echo "Build Number: $(Build.BuildNumber)"
+                echo "Triggered By: $(Build.RequestedFor)"
+                echo "Branch: $(Build.SourceBranchName)"
+                echo "Commit: $(Build.SourceVersion)"
+                echo ""
+                echo "========================================================================"
+                echo "  DEPLOYMENT STRATEGY: PERSISTENT ENVIRONMENTS"
+                echo "========================================================================"
+                echo ""
+                echo "Environment Type:"
+                echo "  • DEV:  Persistent Scratch Org (30 days)"
+                echo "  • QA:   Persistent Scratch Org (30 days)"
+                echo "  • UAT:  Persistent Scratch Org (30 days) [Manual Approval]"
+                echo "  • PROD: Developer Edition [Manual Approval]"
+                echo ""
+                echo "Deployment Approach:"
+                echo "  • Strategy: Manifest-based deployment"
+                echo "  • Manifest: manifest/package-scratch-org.xml"
+                echo "  • Test Level: RunLocalTests"
+                echo "  • Coverage Requirement: 75%"
+                echo ""
+                echo "Environment Details:"
+                echo "  • UAT:  $(uatOrgAlias) - $(uatUsername)"
+                echo "  • PROD: $(prodOrgAlias) - $(prodUsername)"
+                echo ""
+                echo "Note: DEV and QA deployments are handled by CD-Lower pipeline"
+                echo "========================================================================"
+                echo "  NEXT STEPS"
+                echo "========================================================================"
+                echo ""
+                echo "1. Verify deployments in each environment"
+                echo "2. Run smoke tests in PROD"
+                echo "3. Monitor for any issues"
+                echo "4. Update release notes and documentation"
+                echo ""
+                echo "Environment Renewal Reminder:"
+                echo "  • Scratch Orgs (DEV/QA/UAT) expire: 2026-02-12"
+                echo "  • Run renewal script 2 days before expiration"
+                echo "  • Script: ./scripts/setup-persistent-environments.sh"
+                echo ""
+                echo "============================================"
+                echo "CD PIPELINE COMPLETE"
+                echo "============================================"

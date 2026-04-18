@@ -1,0 +1,54 @@
+# azure-pipelines-quality-gate-test.yml
+# Pipeline de prueba para Quality Gate Check
+
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: Quality_Gate_Analysis
+  displayName: 'Quality Gate Evaluation'
+  jobs:
+  - job: Run_Quality_Checks
+    displayName: 'Run All Quality Checks'
+    
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      clean: true
+    
+    # Ejecutar PMD
+    - template: templates/steps/pmd-scanner.yml
+      parameters:
+        sourceDirectory: 'force-app/main/default'
+        failOnViolation: false
+        reportFormat: 'text'
+    
+    # Ejecutar ESLint
+    - task: NodeTool@0
+      displayName: 'Setup Node.js'
+      inputs:
+        versionSpec: '18.x'
+    
+    - template: templates/steps/eslint-validation.yml
+      parameters:
+        sourceDirectory: 'force-app/main/default/lwc'
+        failOnError: false
+        reportFormat: 'stylish'
+    
+    # Ejecutar Coverage Check
+    - template: templates/steps/code-coverage-check.yml
+      parameters:
+        coverageThreshold: 75
+        testLevel: 'RunLocalTests'
+        failOnLowCoverage: false
+    
+    # Evaluar Quality Gate
+    - template: templates/steps/quality-gate-check.yml
+      parameters:
+        pmdMaxViolations: 50
+        eslintMaxErrors: 0
+        coverageMinimum: 75
+        failOnGateViolation: false

@@ -1,0 +1,121 @@
+# /templates/steps/metadata-syntax-validator.yml
+# Validates XML syntax of Salesforce metadata files
+
+parameters:
+- name: sourceDirectory
+  type: string
+  default: 'force-app'
+- name: failOnError
+  type: boolean
+  default: false
+
+steps:
+- task: Bash@3
+  displayName: 'Install XML Validator'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== INSTALLING XML VALIDATOR ==="
+      
+      if command -v xmllint &> /dev/null; then
+        echo "xmllint is available"
+        xmllint --version
+      else
+        echo "Installing libxml2-utils..."
+        sudo apt-get update -qq
+        sudo apt-get install -y libxml2-utils
+      fi
+      
+      echo ""
+
+- task: Bash@3
+  displayName: 'Validate Metadata XML Syntax'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== VALIDATING METADATA XML SYNTAX ==="
+      
+      SOURCE_DIR="${{ parameters.sourceDirectory }}"
+      REPORTS_DIR="reports/build"
+      mkdir -p "$REPORTS_DIR"
+      
+      VALIDATION_REPORT="$REPORTS_DIR/xml-validation.txt"
+      ERROR_COUNT=0
+      VALIDATED_COUNT=0
+      
+      echo "Scanning for XML files in $SOURCE_DIR..."
+      echo ""
+      
+      XML_FILES=$(find "$SOURCE_DIR" -type f \( -name "*.xml" -o -name "*.object-meta.xml" -o -name "*.field-meta.xml" -o -name "*.cls-meta.xml" \) 2>/dev/null)
+      
+      if [ -z "$XML_FILES" ]; then
+        echo "No XML metadata files found"
+        echo "No XML metadata files found in $SOURCE_DIR" > "$VALIDATION_REPORT"
+        exit 0
+      fi
+      
+      TOTAL_FILES=$(echo "$XML_FILES" | wc -l)
+      echo "Found $TOTAL_FILES XML files to validate"
+      echo ""
+      
+      echo "Validating XML syntax..." > "$VALIDATION_REPORT"
+      echo "======================================" >> "$VALIDATION_REPORT"
+      echo "" >> "$VALIDATION_REPORT"
+      
+      while IFS= read -r file; do
+        VALIDATED_COUNT=$((VALIDATED_COUNT + 1))
+        
+        if xmllint --noout "$file" 2>/dev/null; then
+          echo "✓ Valid: $file"
+        else
+          ERROR_COUNT=$((ERROR_COUNT + 1))
+          echo "✗ Invalid: $file"
+          echo "ERROR in $file" >> "$VALIDATION_REPORT"
+          xmllint --noout "$file" 2>&1 | head -5 >> "$VALIDATION_REPORT"
+          echo "" >> "$VALIDATION_REPORT"
+        fi
+      done <<< "$XML_FILES"
+      
+      echo ""
+      echo "========================================"
+      echo "VALIDATION SUMMARY"
+      echo "========================================"
+      echo "Total files validated: $VALIDATED_COUNT"
+      echo "Valid files: $((VALIDATED_COUNT - ERROR_COUNT))"
+      echo "Invalid files: $ERROR_COUNT"
+      echo ""
+      
+      echo "" >> "$VALIDATION_REPORT"
+      echo "======================================" >> "$VALIDATION_REPORT"
+      echo "SUMMARY" >> "$VALIDATION_REPORT"
+      echo "======================================" >> "$VALIDATION_REPORT"
+      echo "Total files validated: $VALIDATED_COUNT" >> "$VALIDATION_REPORT"
+      echo "Valid files: $((VALIDATED_COUNT - ERROR_COUNT))" >> "$VALIDATION_REPORT"
+      echo "Invalid files: $ERROR_COUNT" >> "$VALIDATION_REPORT"
+      
+      echo "Validation report saved to: $VALIDATION_REPORT"
+      
+      echo "##vso[task.setvariable variable=XML_VALIDATED]$VALIDATED_COUNT"
+      echo "##vso[task.setvariable variable=XML_ERRORS]$ERROR_COUNT"
+      
+      if [ $ERROR_COUNT -gt 0 ]; then
+        echo ""
+        echo "⚠️ Found $ERROR_COUNT XML syntax errors"
+        
+        if [ "${{ parameters.failOnError }}" == "true" ]; then
+          echo "Failing build due to failOnError=true"
+          exit 1
+        else
+          echo "Continuing build (failOnError=false)"
+        fi
+      else
+        echo "✅ All XML files are valid"
+      fi
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish XML Validation Report'
+  condition: always()
+  inputs:
+    PathtoPublish: 'reports/build'
+    ArtifactName: 'Build-Validation-Report'
+    publishLocation: 'Container'

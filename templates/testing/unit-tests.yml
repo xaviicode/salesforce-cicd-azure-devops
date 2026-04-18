@@ -1,0 +1,281 @@
+parameters:
+- name: targetOrg
+  type: string
+  default: 'cicd-org'
+- name: testLevel
+  type: string
+  default: 'RunLocalTests'
+- name: coverageThreshold
+  type: number
+  default: 75
+- name: waitTime
+  type: number
+  default: 10
+
+steps:
+- script: |
+    echo "============================================"
+    echo "UNIT TESTS EXECUTION - APEX TESTING"
+    echo "============================================"
+    echo "Target Org: ${{ parameters.targetOrg }}"
+    echo "Test Level: ${{ parameters.testLevel }}"
+    echo "Coverage Threshold: ${{ parameters.coverageThreshold }}%"
+    echo "Wait Time: ${{ parameters.waitTime }} minutes"
+    echo ""
+  displayName: 'Unit Tests - Configuration Display'
+
+- script: |
+    echo "Preparing test execution environment..."
+    
+    mkdir -p $(Build.ArtifactStagingDirectory)/test-results
+    mkdir -p $(Build.ArtifactStagingDirectory)/test-reports
+    mkdir -p $(Build.ArtifactStagingDirectory)/coverage-reports
+    
+    sf org display --target-org ${{ parameters.targetOrg }} --json > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+      echo "ERROR: Cannot connect to org ${{ parameters.targetOrg }}"
+      exit 1
+    fi
+    
+    echo "Test environment prepared successfully"
+  displayName: 'Unit Tests - Environment Preparation'
+
+- script: |
+    echo "============================================"
+    echo "EXECUTING APEX UNIT TESTS"
+    echo "============================================"
+    
+    # Ejecutar tests y capturar output en archivo
+    sf apex run test \
+      --test-level ${{ parameters.testLevel }} \
+      --result-format json \
+      --code-coverage \
+      --target-org ${{ parameters.targetOrg }} \
+      --wait ${{ parameters.waitTime }} \
+      > $(Build.ArtifactStagingDirectory)/test-results/test-result-raw.json
+    
+    TEST_EXIT_CODE=$?
+    
+    # Extraer solo el objeto result del JSON
+    cat $(Build.ArtifactStagingDirectory)/test-results/test-result-raw.json | jq '.result' > $(Build.ArtifactStagingDirectory)/test-results/test-result.json
+    
+    if [ $TEST_EXIT_CODE -eq 0 ]; then
+      echo "Apex tests execution completed"
+      echo "Results saved to: $(Build.ArtifactStagingDirectory)/test-results/test-result.json"
+    else
+      echo "WARNING: Some tests may have failed (exit code: $TEST_EXIT_CODE)"
+    fi
+    
+    # Mostrar resumen
+    echo ""
+    echo "Test Summary:"
+    cat $(Build.ArtifactStagingDirectory)/test-results/test-result.json | jq -r '.summary | "Tests Ran: \(.testsRan), Passed: \(.passing), Failed: \(.failing), Coverage: \(.orgWideCoverage)"'
+    
+    echo $TEST_EXIT_CODE > $(Build.ArtifactStagingDirectory)/test-results/exit-code.txt
+  displayName: 'Unit Tests - Execute Apex Tests'
+  continueOnError: true
+
+- script: |
+    echo "============================================"
+    echo "PARSING TEST RESULTS"
+    echo "============================================"
+    
+    RESULT_FILE="$(Build.ArtifactStagingDirectory)/test-results/test-result.json"
+    
+    if [ ! -f "$RESULT_FILE" ]; then
+      echo "ERROR: Test result file not found at $RESULT_FILE"
+      exit 1
+    fi
+    
+    echo "Parsing test results from: $RESULT_FILE"
+    
+    COVERAGE=$(cat "$RESULT_FILE" | jq -r '.summary.orgWideCoverage // "0"' | sed 's/%//')
+    TESTS_PASSED=$(cat "$RESULT_FILE" | jq -r '.summary.passing // 0')
+    TESTS_FAILED=$(cat "$RESULT_FILE" | jq -r '.summary.failing // 0')
+    TESTS_TOTAL=$(cat "$RESULT_FILE" | jq -r '.summary.testsRan // 0')
+    TESTS_SKIPPED=$(cat "$RESULT_FILE" | jq -r '.summary.skipped // 0')
+    
+    echo ""
+    echo "TEST EXECUTION SUMMARY:"
+    echo "-----------------------"
+    echo "Total Tests Run: $TESTS_TOTAL"
+    echo "Tests Passed: $TESTS_PASSED"
+    echo "Tests Failed: $TESTS_FAILED"
+    echo "Tests Skipped: $TESTS_SKIPPED"
+    echo "Code Coverage: ${COVERAGE}%"
+    echo ""
+    
+    echo "##vso[task.setvariable variable=APEX_COVERAGE]$COVERAGE"
+    echo "##vso[task.setvariable variable=TESTS_PASSED]$TESTS_PASSED"
+    echo "##vso[task.setvariable variable=TESTS_FAILED]$TESTS_FAILED"
+    echo "##vso[task.setvariable variable=TESTS_TOTAL]$TESTS_TOTAL"
+    
+    METRICS_FILE="$(Build.ArtifactStagingDirectory)/test-reports/metrics.txt"
+    
+    echo "UNIT_TESTS_EXECUTION_SUMMARY" > "$METRICS_FILE"
+    echo "============================" >> "$METRICS_FILE"
+    echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> "$METRICS_FILE"
+    echo "Target Org: ${{ parameters.targetOrg }}" >> "$METRICS_FILE"
+    echo "Test Level: ${{ parameters.testLevel }}" >> "$METRICS_FILE"
+    echo "" >> "$METRICS_FILE"
+    echo "RESULTS:" >> "$METRICS_FILE"
+    echo "--------" >> "$METRICS_FILE"
+    echo "Total Tests: $TESTS_TOTAL" >> "$METRICS_FILE"
+    echo "Passed: $TESTS_PASSED" >> "$METRICS_FILE"
+    echo "Failed: $TESTS_FAILED" >> "$METRICS_FILE"
+    echo "Skipped: $TESTS_SKIPPED" >> "$METRICS_FILE"
+    echo "" >> "$METRICS_FILE"
+    echo "CODE COVERAGE:" >> "$METRICS_FILE"
+    echo "--------------" >> "$METRICS_FILE"
+    echo "Org-Wide Coverage: ${COVERAGE}%" >> "$METRICS_FILE"
+    echo "Threshold: ${{ parameters.coverageThreshold }}%" >> "$METRICS_FILE"
+    
+    if [ "$COVERAGE" -ge "${{ parameters.coverageThreshold }}" ]; then
+      echo "Status: PASS" >> "$METRICS_FILE"
+    else
+      echo "Status: FAIL" >> "$METRICS_FILE"
+    fi
+    
+    echo "Metrics saved to artifact staging"
+  displayName: 'Unit Tests - Parse Results'
+
+- script: |
+    echo "============================================"
+    echo "ANALYZING TEST FAILURES"
+    echo "============================================"
+    
+    RESULT_FILE="$(Build.ArtifactStagingDirectory)/test-results/test-result.json"
+    
+    FAILED_TESTS=$(cat "$RESULT_FILE" | jq -r '.tests[] | select(.Outcome == "Fail") | "\(.FullName): \(.Message)"')
+    
+    if [ -z "$FAILED_TESTS" ]; then
+      echo "No test failures detected"
+      echo "All tests passed successfully"
+    else
+      echo "FAILED TESTS DETAILS:"
+      echo "---------------------"
+      echo "$FAILED_TESTS"
+      echo ""
+      
+      echo "$FAILED_TESTS" > $(Build.ArtifactStagingDirectory)/test-reports/failed-tests.txt
+    fi
+  displayName: 'Unit Tests - Analyze Failures'
+  condition: always()
+
+- script: |
+    echo "============================================"
+    echo "COVERAGE VALIDATION"
+    echo "============================================"
+    
+    RESULT_FILE="$(Build.ArtifactStagingDirectory)/test-results/test-result.json"
+    THRESHOLD=${{ parameters.coverageThreshold }}
+    
+    # Extraer coverage directamente del JSON de resultados
+    COVERAGE=$(cat "$RESULT_FILE" | jq -r '.summary.orgWideCoverage // "0"' | sed 's/%//')
+    
+    echo "Current Coverage: ${COVERAGE}%"
+    echo "Required Threshold: ${THRESHOLD}%"
+    echo ""
+    
+    # Validar que se extrajo un valor numérico
+    if [ -z "$COVERAGE" ] || [ "$COVERAGE" = "0" ]; then
+      echo "ERROR: Could not extract coverage value from test results"
+      echo "Checking test result file..."
+      if [ -f "$RESULT_FILE" ]; then
+        echo "File exists. Coverage value in JSON:"
+        cat "$RESULT_FILE" | jq -r '.summary.orgWideCoverage'
+      else
+        echo "ERROR: Test result file not found"
+      fi
+      exit 1
+    fi
+    
+    # Convertir coverage a número entero para comparación
+    COVERAGE_INT=$(echo "$COVERAGE" | awk '{print int($1)}')
+    
+    echo "Coverage (numeric): ${COVERAGE_INT}"
+    
+    if [ "$COVERAGE_INT" -ge "$THRESHOLD" ]; then
+      echo ""
+      echo "COVERAGE CHECK: PASSED"
+      echo "Coverage ${COVERAGE_INT}% meets the required threshold of ${THRESHOLD}%"
+      exit 0
+    else
+      echo ""
+      echo "COVERAGE CHECK: FAILED"
+      echo "Coverage ${COVERAGE_INT}% is below the required threshold of ${THRESHOLD}%"
+      echo "Gap: $((THRESHOLD - COVERAGE_INT))%"
+      exit 1
+    fi
+  displayName: 'Unit Tests - Validate Coverage Threshold'
+
+- script: |
+    echo "============================================"
+    echo "GENERATING JUNIT REPORT"
+    echo "============================================"
+    
+    RESULT_FILE="$(Build.ArtifactStagingDirectory)/test-results/test-result.json"
+    JUNIT_FILE="$(Build.ArtifactStagingDirectory)/test-reports/junit-report.xml"
+    
+    echo "const fs = require('fs');" > convert-to-junit.js
+    echo "const results = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));" >> convert-to-junit.js
+    echo "" >> convert-to-junit.js
+    echo "let xml = '<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n';" >> convert-to-junit.js
+    echo "xml += '<testsuites>\\n';" >> convert-to-junit.js
+    echo "xml += \`  <testsuite name=\"Apex Unit Tests\" tests=\"\${results.summary.testsRan}\" failures=\"\${results.summary.failing}\" skipped=\"\${results.summary.skipped}\">\\n\`;" >> convert-to-junit.js
+    echo "" >> convert-to-junit.js
+    echo "results.tests.forEach(test => {" >> convert-to-junit.js
+    echo "  xml += \`    <testcase classname=\"\${test.ApexClass.Name}\" name=\"\${test.MethodName}\" time=\"\${test.RunTime || 0}\">\\n\`;" >> convert-to-junit.js
+    echo "  if (test.Outcome === 'Fail') {" >> convert-to-junit.js
+    echo "    xml += \`      <failure message=\"\${test.Message}\">\${test.StackTrace}</failure>\\n\`;" >> convert-to-junit.js
+    echo "  }" >> convert-to-junit.js
+    echo "  xml += \`    </testcase>\\n\`;" >> convert-to-junit.js
+    echo "});" >> convert-to-junit.js
+    echo "" >> convert-to-junit.js
+    echo "xml += '  </testsuite>\\n';" >> convert-to-junit.js
+    echo "xml += '</testsuites>';" >> convert-to-junit.js
+    echo "" >> convert-to-junit.js
+    echo "fs.writeFileSync(process.argv[3], xml);" >> convert-to-junit.js
+    echo "console.log('JUnit report generated successfully');" >> convert-to-junit.js
+    
+    node convert-to-junit.js "$RESULT_FILE" "$JUNIT_FILE"
+    
+    echo "JUnit report saved to: $JUNIT_FILE"
+  displayName: 'Unit Tests - Generate JUnit Report'
+  condition: always()
+
+- task: PublishTestResults@2
+  displayName: 'Unit Tests - Publish Test Results'
+  condition: always()
+  inputs:
+    testResultsFormat: 'JUnit'
+    testResultsFiles: '$(Build.ArtifactStagingDirectory)/test-reports/junit-report.xml'
+    testRunTitle: 'Apex Unit Tests'
+    failTaskOnFailedTests: false
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Unit Tests - Publish Artifacts'
+  condition: always()
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/test-reports'
+    ArtifactName: 'Unit-Tests-Report'
+    publishLocation: 'Container'
+
+- script: |
+    echo "============================================"
+    echo "UNIT TESTS - FINAL STATUS"
+    echo "============================================"
+    
+    EXIT_CODE=$(cat $(Build.ArtifactStagingDirectory)/test-results/exit-code.txt)
+    TESTS_FAILED=$(cat $(Build.ArtifactStagingDirectory)/test-reports/metrics.txt | grep "Failed:" | awk '{print $2}')
+    
+    if [ "$EXIT_CODE" -eq 0 ] && [ "$TESTS_FAILED" -eq 0 ]; then
+      echo "STATUS: SUCCESS"
+      echo "All unit tests passed successfully"
+      exit 0
+    else
+      echo "STATUS: FAILED"
+      echo "Some unit tests failed or did not complete"
+      exit 1
+    fi
+  displayName: 'Unit Tests - Final Validation'

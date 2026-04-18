@@ -1,0 +1,256 @@
+parameters:
+- name: targetOrg
+  type: string
+  default: 'cicd-org'
+- name: baseCommit
+  type: string
+  default: 'origin/main'
+- name: targetCommit
+  type: string
+  default: 'HEAD'
+- name: testLevel
+  type: string
+  default: 'RunLocalTests'
+
+steps:
+- script: |
+    echo "=========================================="
+    echo "DELTA DEPLOYMENT - CONFIGURATION"
+    echo "=========================================="
+    echo "Target Org: ${{ parameters.targetOrg }}"
+    echo "Base Commit: ${{ parameters.baseCommit }}"
+    echo "Target Commit: ${{ parameters.targetCommit }}"
+    echo "Test Level: ${{ parameters.testLevel }}"
+    echo ""
+  displayName: 'Delta Deployment - Configuration'
+
+- script: |
+    echo "Preparing delta deployment environment..."
+    
+    mkdir -p manifest
+    mkdir -p $(Build.ArtifactStagingDirectory)/delta-reports
+    
+    echo "Environment prepared"
+  displayName: 'Delta Deployment - Environment Preparation'
+
+- script: |
+    echo "=========================================="
+    echo "GENERATING DELTA PACKAGE"
+    echo "=========================================="
+    
+    chmod +x scripts/generate-delta-package.sh
+    
+    bash scripts/generate-delta-package.sh \
+      "${{ parameters.baseCommit }}" \
+      "${{ parameters.targetCommit }}" \
+      "manifest/package.xml"
+    
+    if [ ! -f "manifest/package.xml" ]; then
+      echo "ERROR: package.xml generation failed"
+      exit 1
+    fi
+    
+    cp manifest/package.xml $(Build.ArtifactStagingDirectory)/delta-reports/package.xml
+    
+    echo ""
+    echo "Delta package generated successfully"
+  displayName: 'Delta Deployment - Generate Package'
+
+- script: |
+    echo "=========================================="
+    echo "ANALYZING DELTA PACKAGE"
+    echo "=========================================="
+    
+    if [ ! -f "manifest/package.xml" ]; then
+      echo "ERROR: package.xml not found"
+      exit 1
+    fi
+    
+    echo "Package contents"
+    echo "----------------"
+    cat manifest/package.xml
+    echo ""
+    
+    MEMBER_COUNT=$(grep -c "<members>" manifest/package.xml || echo "0")
+    TYPE_COUNT=$(grep -c "<types>" manifest/package.xml || echo "0")
+    
+    echo "DELTA SUMMARY"
+    echo "-------------"
+    echo "Metadata Types: $TYPE_COUNT"
+    echo "Total Components: $MEMBER_COUNT"
+    echo ""
+    
+    echo "MEMBER_COUNT=$MEMBER_COUNT" > $(Build.ArtifactStagingDirectory)/delta-reports/delta-summary.txt
+    echo "TYPE_COUNT=$TYPE_COUNT" >> $(Build.ArtifactStagingDirectory)/delta-reports/delta-summary.txt
+    
+    if [ "$MEMBER_COUNT" -eq 0 ]; then
+      echo "STATUS: NO CHANGES DETECTED"
+      echo "No components to deploy - validation will be skipped"
+      echo "SKIP" > $(Build.ArtifactStagingDirectory)/delta-reports/validation-status.txt
+    else
+      echo "STATUS: CHANGES DETECTED"
+      echo "Proceeding with validation"
+      echo "VALIDATE" > $(Build.ArtifactStagingDirectory)/delta-reports/validation-status.txt
+    fi
+  displayName: 'Delta Deployment - Analyze Package'
+
+- script: |
+    echo "=========================================="
+    echo "VALIDATING DELTA DEPLOYMENT"
+    echo "=========================================="
+    
+    VALIDATION_STATUS=$(cat $(Build.ArtifactStagingDirectory)/delta-reports/validation-status.txt)
+    
+    if [ "$VALIDATION_STATUS" = "SKIP" ]; then
+      echo "No changes detected - skipping validation"
+      echo "0" > $(Build.ArtifactStagingDirectory)/delta-reports/validation-exit-code.txt
+      exit 0
+    fi
+    
+    echo "Validating delta deployment with check-only mode..."
+    echo ""
+    
+    sf project deploy start \
+      --manifest manifest/package.xml \
+      --target-org ${{ parameters.targetOrg }} \
+      --test-level ${{ parameters.testLevel }} \
+      --wait 33 \
+      --dry-run \
+      --verbose \
+      --json > $(Build.ArtifactStagingDirectory)/delta-reports/validation-result.json 2>&1
+    
+    VALIDATION_EXIT=$?
+    
+    cat $(Build.ArtifactStagingDirectory)/delta-reports/validation-result.json | tee $(Build.ArtifactStagingDirectory)/delta-reports/validation-output.log
+    
+    echo ""
+    echo "Validation exit code: $VALIDATION_EXIT"
+    echo $VALIDATION_EXIT > $(Build.ArtifactStagingDirectory)/delta-reports/validation-exit-code.txt
+    
+    if [ $VALIDATION_EXIT -eq 0 ]; then
+      echo ""
+      echo "DELTA VALIDATION: SUCCESS"
+      echo "All changed components validated successfully"
+      echo "Components are ready for deployment"
+    else
+      echo ""
+      echo "DELTA VALIDATION: FAILED"
+      echo "There are issues with the changed components"
+      echo "Review validation errors before proceeding"
+    fi
+  displayName: 'Delta Deployment - Validate'
+  continueOnError: true
+
+- script: |
+    echo "=========================================="
+    echo "EXTRACTING VALIDATION RESULTS"
+    echo "=========================================="
+    
+    VALIDATION_STATUS=$(cat $(Build.ArtifactStagingDirectory)/delta-reports/validation-status.txt)
+    
+    if [ "$VALIDATION_STATUS" = "SKIP" ]; then
+      echo "Validation was skipped - no results to extract"
+      exit 0
+    fi
+    
+    RESULT_FILE=$(Build.ArtifactStagingDirectory)/delta-reports/validation-result.json
+    
+    if [ ! -f "$RESULT_FILE" ]; then
+      echo "No validation results found"
+      exit 0
+    fi
+    
+    echo "Parsing validation results..."
+    
+    if grep -q '"id"' "$RESULT_FILE"; then
+      DEPLOY_ID=$(cat "$RESULT_FILE" | jq -r '.result.id // empty' 2>/dev/null || echo "")
+      if [ ! -z "$DEPLOY_ID" ]; then
+        echo "Deploy/Validation ID: $DEPLOY_ID"
+        echo "$DEPLOY_ID" > $(Build.ArtifactStagingDirectory)/delta-reports/deploy-id.txt
+      fi
+    fi
+    
+    if grep -q '"componentFailures"' "$RESULT_FILE"; then
+      echo ""
+      echo "COMPONENT FAILURES DETECTED"
+      cat "$RESULT_FILE" | jq -r '.result.details.componentFailures[]?' 2>/dev/null > $(Build.ArtifactStagingDirectory)/delta-reports/component-failures.txt || echo "Could not parse component failures"
+    else
+      echo "No component failures detected"
+    fi
+    
+    if grep -q '"runTestResult"' "$RESULT_FILE"; then
+      TEST_FAILURES=$(cat "$RESULT_FILE" | jq -r '.result.details.runTestResult.failures[]?' 2>/dev/null)
+      if [ ! -z "$TEST_FAILURES" ]; then
+        echo ""
+        echo "TEST FAILURES DETECTED"
+        echo "$TEST_FAILURES" > $(Build.ArtifactStagingDirectory)/delta-reports/test-failures.txt
+      else
+        echo "No test failures detected"
+      fi
+    else
+      echo "No test failures detected"
+    fi
+  displayName: 'Delta Deployment - Extract Results'
+  condition: always()
+
+- script: |
+    echo "=========================================="
+    echo "DELTA DEPLOYMENT GATE VALIDATION"
+    echo "=========================================="
+    
+    VALIDATION_STATUS=$(cat $(Build.ArtifactStagingDirectory)/delta-reports/validation-status.txt)
+    
+    if [ "$VALIDATION_STATUS" = "SKIP" ]; then
+      echo "GATE STATUS: PASSED (No changes to validate)"
+      exit 0
+    fi
+    
+    EXIT_CODE=$(cat $(Build.ArtifactStagingDirectory)/delta-reports/validation-exit-code.txt)
+    
+    echo "Validation Exit Code: $EXIT_CODE"
+    echo ""
+    
+    if [ "$EXIT_CODE" -eq 0 ]; then
+      echo "DELTA DEPLOYMENT GATE: PASSED"
+      echo "All changed components validated successfully"
+      
+      if [ -f "$(Build.ArtifactStagingDirectory)/delta-reports/deploy-id.txt" ]; then
+        DEPLOY_ID=$(cat $(Build.ArtifactStagingDirectory)/delta-reports/deploy-id.txt)
+        echo ""
+        echo "QUICK DEPLOY READY"
+        echo "-------------------"
+        echo "Validation ID: $DEPLOY_ID"
+        echo "Command: sf force:source:deploy --validateddeployrequestid $DEPLOY_ID --targetusername ${{ parameters.targetOrg }}"
+      fi
+      
+      exit 0
+    else
+      echo "DELTA DEPLOYMENT GATE: FAILED"
+      echo "Changed components have validation errors"
+      echo "Check delta-reports artifacts for details"
+      exit 1
+    fi
+  displayName: 'Delta Deployment - Gate Check'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Delta Deployment - Publish Artifacts'
+  condition: always()
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/delta-reports'
+    ArtifactName: 'Delta-Deployment-Report'
+    publishLocation: 'Container'
+
+- script: |
+    echo "=========================================="
+    echo "DELTA DEPLOYMENT - SUMMARY"
+    echo "=========================================="
+    
+    if [ -f "$(Build.ArtifactStagingDirectory)/delta-reports/delta-summary.txt" ]; then
+      cat $(Build.ArtifactStagingDirectory)/delta-reports/delta-summary.txt
+    fi
+    
+    echo ""
+    echo "Delta deployment validation completed"
+    echo "Review Delta-Deployment-Report artifact for details"
+  displayName: 'Delta Deployment - Final Summary'
+  condition: always()

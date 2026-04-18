@@ -1,0 +1,54 @@
+# azure-pipelines-auth-test.yml
+# Pipeline de prueba para Salesforce Authentication
+
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- group: Salesforce_CICD_Variables
+
+stages:
+- stage: Salesforce_Authentication
+  displayName: 'Salesforce Authentication Test'
+  jobs:
+  - job: Authenticate_And_Validate
+    displayName: 'Authenticate and Validate Connection'
+    
+    steps:
+    - checkout: self
+      displayName: 'Checkout Repository'
+      clean: true
+    
+    # Setup Salesforce CLI
+    - task: NodeTool@0
+      displayName: 'Setup Node.js'
+      inputs:
+        versionSpec: '18.x'
+    
+    - task: Bash@3
+      displayName: 'Install Salesforce CLI'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Installing Salesforce CLI..."
+          npm install -g @salesforce/cli@latest
+          sf version
+    
+    # Authenticate
+    - template: templates/steps/salesforce-jwt-auth.yml
+      parameters:
+        instanceUrl: 'https://login.salesforce.com'
+        alias: 'cicd-org'
+    
+    # Validate Connection
+    - template: templates/steps/org-connection-validation.yml
+      parameters:
+        orgAlias: 'cicd-org'
+    
+    # Display Org Info
+    - template: templates/steps/org-info-display.yml
+      parameters:
+        orgAlias: 'cicd-org'

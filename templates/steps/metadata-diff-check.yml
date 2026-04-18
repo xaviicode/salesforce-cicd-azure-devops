@@ -1,0 +1,85 @@
+# /templates/steps/metadata-diff-check.yml
+# Detects changes in metadata between commits
+
+parameters:
+- name: baseCommit
+  type: string
+  default: 'HEAD~1'
+- name: compareCommit
+  type: string
+  default: 'HEAD'
+
+steps:
+- task: Bash@3
+  displayName: 'Generate Metadata Diff Report'
+  condition: always()  # Cambiar de 'eq(variables['HAS_METADATA_CHANGES'], 'true')' a 'always()'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== GENERATING METADATA DIFF REPORT ==="
+      
+      REPORTS_DIR="reports/metadata"
+      mkdir -p "$REPORTS_DIR"
+      
+      BASE_COMMIT="${{ parameters.baseCommit }}"
+      COMPARE_COMMIT="${{ parameters.compareCommit }}"
+      
+      if [ "$(HAS_METADATA_CHANGES)" == "true" ]; then
+        echo "Changes detected - generating detailed diff"
+        
+        git diff "$BASE_COMMIT" "$COMPARE_COMMIT" -- force-app/ > "$REPORTS_DIR/metadata-diff.txt"
+        
+        SUMMARY_REPORT="$REPORTS_DIR/metadata-changes-summary.txt"
+        
+        cat > "$SUMMARY_REPORT" <<EOF
+      ========================================
+      METADATA CHANGES SUMMARY
+      ========================================
+      Generated: $(date -Iseconds)
+      Build: $(Build.BuildNumber)
+      Branch: $(Build.SourceBranchName)
+      
+      ----------------------------------------
+      COMPARISON
+      ----------------------------------------
+      Base Commit: $BASE_COMMIT
+      Compare Commit: $COMPARE_COMMIT
+      
+      ----------------------------------------
+      CHANGES BY TYPE
+      ----------------------------------------
+      Apex Classes/Triggers: $(APEX_CHANGES)
+      LWC Components: $(LWC_CHANGES)
+      
+      ----------------------------------------
+      CHANGED FILES
+      ----------------------------------------
+      EOF
+        
+        git diff --name-status "$BASE_COMMIT" "$COMPARE_COMMIT" -- force-app/ >> "$SUMMARY_REPORT"
+      else
+        echo "No metadata changes detected"
+        
+        SUMMARY_REPORT="$REPORTS_DIR/metadata-changes-summary.txt"
+        
+        cat > "$SUMMARY_REPORT" <<EOF
+      ========================================
+      METADATA CHANGES SUMMARY
+      ========================================
+      Generated: $(date -Iseconds)
+      Build: $(Build.BuildNumber)
+      Branch: $(Build.SourceBranchName)
+      
+      ----------------------------------------
+      RESULT
+      ----------------------------------------
+      No metadata changes detected between commits
+      
+      Base Commit: $BASE_COMMIT
+      Compare Commit: $COMPARE_COMMIT
+      EOF
+      fi
+      
+      echo ""
+      echo "Reports generated in: $REPORTS_DIR"
+      cat "$SUMMARY_REPORT"

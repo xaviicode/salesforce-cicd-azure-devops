@@ -1,0 +1,104 @@
+# ============================================================================
+# Template: Deploy Metadata to Salesforce Org
+# Purpose: Deploy metadata to pre-existing environment using manifest
+# Used by: jobs-environment-deployment.yml
+# ============================================================================
+
+parameters:
+  - name: orgAlias
+    type: string
+    displayName: 'Target Org Alias'
+  
+  - name: manifestPath
+    type: string
+    displayName: 'Manifest Path'
+    default: 'manifest/package-scratch-org.xml'
+  
+  - name: testLevel
+    type: string
+    displayName: 'Test Level'
+    default: 'NoTestRun'
+    values:
+      - NoTestRun
+      - RunLocalTests
+      - RunAllTestsInOrg
+
+steps:
+  - task: Bash@3
+    displayName: 'Deploy Metadata to ${{ parameters.orgAlias }}'
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "============================================"
+        echo "DEPLOYING METADATA TO SALESFORCE ORG"
+        echo "============================================"
+        
+        echo "Strategy: Manifest-based (optimized)"
+        echo "Manifest: ${{ parameters.manifestPath }}"
+        echo "Target: ${{ parameters.orgAlias }}"
+        echo "Test Level: ${{ parameters.testLevel }}"
+        echo ""
+        
+        # Verify connection before deploying
+        echo "Verifying org connection..."
+        sf org display --target-org "${{ parameters.orgAlias }}"
+        
+        if [ $? -ne 0 ]; then
+          echo "[ERROR] Cannot connect to org: ${{ parameters.orgAlias }}"
+          exit 1
+        fi
+        
+        echo ""
+        echo "Deploying metadata..."
+        
+        # Deploy using manifest
+        sf project deploy start \
+          --manifest "${{ parameters.manifestPath }}" \
+          --target-org "${{ parameters.orgAlias }}" \
+          --test-level "${{ parameters.testLevel }}" \
+          --ignore-conflicts \
+          --wait 30 \
+          --verbose
+        
+        DEPLOY_EXIT_CODE=$?
+        
+        echo ""
+        echo "============================================"
+        
+        if [ $DEPLOY_EXIT_CODE -eq 0 ]; then
+          echo "[SUCCESS] Deployment completed successfully"
+          
+          # Show deployment summary
+          echo ""
+          echo "Fetching deployment details..."
+          sf project deploy report --target-org "${{ parameters.orgAlias }}"
+          
+          echo ""
+          echo "[INFO] Deployment to ${{ parameters.orgAlias }} completed"
+        else
+          echo "[ERROR] Deployment failed"
+          echo ""
+          echo "Fetching failure details..."
+          sf project deploy report --target-org "${{ parameters.orgAlias }}" || true
+          
+          exit 1
+        fi
+
+  - task: Bash@3
+    displayName: 'List Deployed Components'
+    condition: succeeded()
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "============================================"
+        echo "DEPLOYED COMPONENTS SUMMARY"
+        echo "============================================"
+        
+        # List components from manifest
+        if [ -f "${{ parameters.manifestPath }}" ]; then
+          echo "Components from manifest:"
+          cat "${{ parameters.manifestPath }}" | grep -E "<name>|<members>" | sed 's/<[^>]*>//g' | sed 's/^[ \t]*/  /'
+        fi
+        
+        echo ""
+        echo "[INFO] For detailed component list, check deployment report above"

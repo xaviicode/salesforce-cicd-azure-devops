@@ -1,0 +1,107 @@
+# /templates/steps/metadata-package-builder.yml
+# Builds deployment package from metadata changes
+
+parameters:
+- name: packageName
+  type: string
+  default: 'deployment-package'
+- name: apiVersion
+  type: string
+  default: '62.0'
+
+steps:
+- task: Bash@3
+  displayName: 'Build Deployment Package'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== BUILDING DEPLOYMENT PACKAGE ==="
+      
+      PACKAGE_NAME="${{ parameters.packageName }}"
+      API_VERSION="${{ parameters.apiVersion }}"
+      
+      PACKAGE_DIR="packages/$PACKAGE_NAME"
+      mkdir -p "$PACKAGE_DIR"
+      
+      echo "Package Name: $PACKAGE_NAME"
+      echo "API Version: $API_VERSION"
+      echo "Output Directory: $PACKAGE_DIR"
+      echo ""
+      
+      # Copiar metadata al package
+      if [ -d "force-app" ]; then
+        echo "Copying metadata to package..."
+        cp -r force-app "$PACKAGE_DIR/"
+        
+        # Copiar manifest si existe
+        if [ -f "manifest/package.xml" ]; then
+          cp manifest/package.xml "$PACKAGE_DIR/"
+          echo "package.xml included"
+        else
+          echo "Warning: package.xml not found"
+        fi
+        
+        echo ""
+        echo "Package built successfully"
+        echo "Location: $PACKAGE_DIR"
+        
+        # Listar contenido del package
+        echo ""
+        echo "Package contents:"
+        find "$PACKAGE_DIR" -type f | head -20
+        
+        TOTAL_FILES=$(find "$PACKAGE_DIR" -type f | wc -l)
+        echo ""
+        echo "Total files in package: $TOTAL_FILES"
+        
+        echo "##vso[task.setvariable variable=PACKAGE_READY]true"
+        echo "##vso[task.setvariable variable=PACKAGE_PATH]$PACKAGE_DIR"
+      else
+        echo "Error: force-app directory not found"
+        exit 1
+      fi
+
+- task: Bash@3
+  displayName: 'Validate Package Structure'
+  condition: eq(variables['PACKAGE_READY'], 'true')
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== VALIDATING PACKAGE STRUCTURE ==="
+      
+      PACKAGE_DIR="$(PACKAGE_PATH)"
+      
+      # Validar estructura requerida
+      VALIDATION_ERRORS=0
+      
+      if [ ! -d "$PACKAGE_DIR/force-app" ]; then
+        echo "Error: force-app directory missing"
+        VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      else
+        echo "force-app: OK"
+      fi
+      
+      if [ ! -f "$PACKAGE_DIR/package.xml" ]; then
+        echo "Warning: package.xml missing"
+      else
+        echo "package.xml: OK"
+      fi
+      
+      echo ""
+      
+      if [ $VALIDATION_ERRORS -eq 0 ]; then
+        echo "Package structure: VALID"
+        echo "##vso[task.setvariable variable=PACKAGE_VALID]true"
+      else
+        echo "Package structure: INVALID ($VALIDATION_ERRORS errors)"
+        echo "##vso[task.setvariable variable=PACKAGE_VALID]false"
+        exit 1
+      fi
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Deployment Package'
+  condition: eq(variables['PACKAGE_VALID'], 'true')
+  inputs:
+    PathtoPublish: 'packages'
+    ArtifactName: 'Deployment-Package'
+    publishLocation: 'Container'

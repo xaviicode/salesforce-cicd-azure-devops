@@ -1,0 +1,186 @@
+# /templates/steps/package-validator.yml
+# Validates package.xml structure and API version compatibility
+
+parameters:
+- name: manifestPath
+  type: string
+  default: 'manifest/package.xml'
+- name: minApiVersion
+  type: string
+  default: '58.0'
+- name: maxApiVersion
+  type: string
+  default: '62.0'
+- name: failOnError
+  type: boolean
+  default: false
+
+steps:
+- task: Bash@3
+  displayName: 'Validate Package.xml Structure'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "=== VALIDATING PACKAGE.XML ==="
+      
+      MANIFEST_PATH="${{ parameters.manifestPath }}"
+      MIN_API="${{ parameters.minApiVersion }}"
+      MAX_API="${{ parameters.maxApiVersion }}"
+      REPORTS_DIR="reports/build"
+      mkdir -p "$REPORTS_DIR"
+      
+      PACKAGE_REPORT="$REPORTS_DIR/package-validation.txt"
+      VALIDATION_ERRORS=0
+      
+      echo "Manifest Path: $MANIFEST_PATH"
+      echo "API Version Range: $MIN_API - $MAX_API"
+      echo ""
+      
+      if [ ! -f "$MANIFEST_PATH" ]; then
+        echo "❌ ERROR: package.xml not found at $MANIFEST_PATH"
+        echo "ERROR: package.xml not found at $MANIFEST_PATH" > "$PACKAGE_REPORT"
+        echo "##vso[task.setvariable variable=PACKAGE_VALID]false"
+        
+        if [ "${{ parameters.failOnError }}" == "true" ]; then
+          exit 1
+        fi
+        exit 0
+      fi
+      
+      echo "✓ Package.xml found"
+      echo ""
+      
+      echo "======================================" > "$PACKAGE_REPORT"
+      echo "PACKAGE.XML VALIDATION REPORT" >> "$PACKAGE_REPORT"
+      echo "======================================" >> "$PACKAGE_REPORT"
+      echo "Manifest: $MANIFEST_PATH" >> "$PACKAGE_REPORT"
+      echo "Generated: $(date -Iseconds)" >> "$PACKAGE_REPORT"
+      echo "" >> "$PACKAGE_REPORT"
+      
+      echo "Validating XML syntax..."
+      if xmllint --noout "$MANIFEST_PATH" 2>/dev/null; then
+        echo "✓ XML syntax is valid"
+        echo "✓ XML syntax: VALID" >> "$PACKAGE_REPORT"
+      else
+        echo "✗ XML syntax is invalid"
+        echo "✗ XML syntax: INVALID" >> "$PACKAGE_REPORT"
+        xmllint --noout "$MANIFEST_PATH" 2>&1 >> "$PACKAGE_REPORT"
+        VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      fi
+      
+      echo "Validating XML namespace..."
+      if grep -q 'xmlns="http://soap.sforce.com/2006/04/metadata"' "$MANIFEST_PATH"; then
+        echo "✓ Correct namespace found"
+        echo "✓ Namespace: VALID" >> "$PACKAGE_REPORT"
+      else
+        echo "✗ Missing or incorrect namespace"
+        echo "✗ Namespace: INVALID" >> "$PACKAGE_REPORT"
+        VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      fi
+      
+      echo "Validating API version..."
+      API_VERSION=$(grep -oP '(?<=<version>)[0-9.]+(?=</version>)' "$MANIFEST_PATH" | head -1)
+      
+      if [ -n "$API_VERSION" ]; then
+        echo "Found API version: $API_VERSION"
+        echo "API Version: $API_VERSION" >> "$PACKAGE_REPORT"
+        
+        if command -v bc &> /dev/null; then
+          if [ "$(echo "$API_VERSION >= $MIN_API" | bc -l)" -eq 1 ] && \
+             [ "$(echo "$API_VERSION <= $MAX_API" | bc -l)" -eq 1 ]; then
+            echo "✓ API version is within range ($MIN_API - $MAX_API)"
+            echo "✓ API Version Range: VALID" >> "$PACKAGE_REPORT"
+          else
+            echo "⚠ API version outside recommended range ($MIN_API - $MAX_API)"
+            echo "⚠ API Version Range: WARNING" >> "$PACKAGE_REPORT"
+          fi
+        else
+          echo "✓ API version found: $API_VERSION"
+          echo "✓ API Version: FOUND" >> "$PACKAGE_REPORT"
+        fi
+      else
+        echo "✗ API version not found"
+        echo "✗ API Version: NOT FOUND" >> "$PACKAGE_REPORT"
+        VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+      fi
+      
+      echo "Analyzing metadata types..."
+      TYPES_COUNT=$(grep -c '<types>' "$MANIFEST_PATH" || echo "0")
+      MEMBERS_COUNT=$(grep -c '<members>' "$MANIFEST_PATH" || echo "0")
+      
+      echo "Metadata types: $TYPES_COUNT"
+      echo "Metadata members: $MEMBERS_COUNT"
+      
+      echo "" >> "$PACKAGE_REPORT"
+      echo "Metadata Statistics:" >> "$PACKAGE_REPORT"
+      echo "  - Types defined: $TYPES_COUNT" >> "$PACKAGE_REPORT"
+      echo "  - Members defined: $MEMBERS_COUNT" >> "$PACKAGE_REPORT"
+      
+      echo "Checking common metadata types..."
+      
+      COMMON_TYPES=(
+        "ApexClass"
+        "ApexTrigger"
+        "LightningComponentBundle"
+        "CustomObject"
+        "CustomField"
+      )
+      
+      echo "" >> "$PACKAGE_REPORT"
+      echo "Common Metadata Types Found:" >> "$PACKAGE_REPORT"
+      
+      for TYPE in "${COMMON_TYPES[@]}"; do
+        if grep -q "<name>$TYPE</name>" "$MANIFEST_PATH"; then
+          echo "  ✓ $TYPE"
+          echo "  ✓ $TYPE" >> "$PACKAGE_REPORT"
+        fi
+      done
+      
+      echo ""
+      echo "========================================"
+      echo "VALIDATION SUMMARY"
+      echo "========================================"
+      echo "Validation errors: $VALIDATION_ERRORS"
+      echo "Metadata types: $TYPES_COUNT"
+      echo "Total members: $MEMBERS_COUNT"
+      echo ""
+      
+      echo "" >> "$PACKAGE_REPORT"
+      echo "======================================" >> "$PACKAGE_REPORT"
+      echo "VALIDATION SUMMARY" >> "$PACKAGE_REPORT"
+      echo "======================================" >> "$PACKAGE_REPORT"
+      echo "Validation errors: $VALIDATION_ERRORS" >> "$PACKAGE_REPORT"
+      echo "Metadata types: $TYPES_COUNT" >> "$PACKAGE_REPORT"
+      echo "Total members: $MEMBERS_COUNT" >> "$PACKAGE_REPORT"
+      
+      if [ $VALIDATION_ERRORS -eq 0 ]; then
+        echo "Status: VALID" >> "$PACKAGE_REPORT"
+      else
+        echo "Status: INVALID" >> "$PACKAGE_REPORT"
+      fi
+      
+      echo "Validation report saved to: $PACKAGE_REPORT"
+      
+      echo "##vso[task.setvariable variable=PACKAGE_TYPES]$TYPES_COUNT"
+      echo "##vso[task.setvariable variable=PACKAGE_MEMBERS]$MEMBERS_COUNT"
+      echo "##vso[task.setvariable variable=PACKAGE_ERRORS]$VALIDATION_ERRORS"
+      
+      if [ $VALIDATION_ERRORS -eq 0 ]; then
+        echo "##vso[task.setvariable variable=PACKAGE_VALID]true"
+        echo "Package.xml validation passed"
+      else
+        echo "##vso[task.setvariable variable=PACKAGE_VALID]false"
+        echo "Package.xml validation failed with $VALIDATION_ERRORS errors"
+        
+        if [ "${{ parameters.failOnError }}" == "true" ]; then
+          exit 1
+        fi
+      fi
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Package Validation Report'
+  condition: always()
+  inputs:
+    PathtoPublish: 'reports/build'
+    ArtifactName: 'Build-Validation-Report'
+    publishLocation: 'Container'

@@ -1,0 +1,289 @@
+# templates/quality/artifact-packager.yml
+# Artifact Packager Template
+# Packages all quality artifacts with metadata
+
+parameters:
+- name: artifactName
+  type: string
+  default: 'Quality-Reports'
+- name: includeDeploymentPackage
+  type: boolean
+  default: true
+
+steps:
+- script: |
+    echo "================================================"
+    echo "ARTIFACT PACKAGING"
+    echo "================================================"
+    echo "Artifact Name: ${{ parameters.artifactName }}"
+    echo "Include Deployment Package: ${{ parameters.includeDeploymentPackage }}"
+    echo ""
+    
+    REPORTS_DIR=$(Build.ArtifactStagingDirectory)/quality-reports
+    
+    # Ensure directory exists
+    mkdir -p $REPORTS_DIR
+    
+    echo "Preparing artifact metadata..."
+    
+    # Create artifact manifest
+    cat > $REPORTS_DIR/artifact-manifest.json << EOF
+    {
+      "artifactName": "${{ parameters.artifactName }}",
+      "buildNumber": "$(Build.BuildNumber)",
+      "buildId": "$(Build.BuildId)",
+      "branch": "$(Build.SourceBranchName)",
+      "commit": "$(Build.SourceVersion)",
+      "commitMessage": "$(Build.SourceVersionMessage)",
+      "triggeredBy": "$(Build.RequestedFor)",
+      "startTime": "$(System.PipelineStartTime)",
+      "repository": "$(Build.Repository.Name)",
+      "artifacts": [],
+      "metadata": {
+        "project": "Salesforce CI/CD",
+        "environment": "$(Build.SourceBranchName)",
+        "apiVersion": "62.0"
+      }
+    }
+    EOF
+    
+    echo "✅ Artifact manifest created"
+    
+  displayName: 'Initialize Artifact Packaging'
+
+- script: |
+    echo "================================================"
+    echo "COLLECTING QUALITY ARTIFACTS"
+    echo "================================================"
+    
+    REPORTS_DIR=$(Build.ArtifactStagingDirectory)/quality-reports
+    MANIFEST=$REPORTS_DIR/artifact-manifest.json
+    
+    # Function to add artifact to manifest
+    add_artifact() {
+      local file=$1
+      local type=$2
+      local description=$3
+      
+      if [ -f "$REPORTS_DIR/$file" ]; then
+        SIZE=$(stat -f%z "$REPORTS_DIR/$file" 2>/dev/null || stat -c%s "$REPORTS_DIR/$file" 2>/dev/null)
+        echo "  ✅ $file (${SIZE} bytes)"
+        
+        jq --arg file "$file" \
+           --arg type "$type" \
+           --arg desc "$description" \
+           --arg size "$SIZE" \
+           '.artifacts += [{
+             "filename": $file,
+             "type": $type,
+             "description": $desc,
+             "size": ($size | tonumber),
+             "timestamp": now | strftime("%Y-%m-%dT%H:%M:%SZ")
+           }]' $MANIFEST > temp.json
+        
+        mv temp.json $MANIFEST
+      else
+        echo "  ⚠️ $file (not found)"
+      fi
+    }
+    
+    echo ""
+    echo "Collecting artifacts:"
+    
+    # Add quality artifacts
+    add_artifact "metrics.json" "quality-metrics" "Quality metrics calculation results"
+    add_artifact "gate-results.json" "gate-results" "Quality gate evaluation results"
+    add_artifact "junit-report.xml" "junit-report" "JUnit format test results"
+    add_artifact "sonar-report.json" "sonar-report" "SonarQube format quality report"
+    add_artifact "test-results.json" "test-results" "Salesforce Apex test results"
+    add_artifact "validation-result.json" "validation" "Deployment validation results"
+    
+    # Check for PMD report
+    if [ -f "$(Build.ArtifactStagingDirectory)/pmd-report.json" ]; then
+      cp $(Build.ArtifactStagingDirectory)/pmd-report.json $REPORTS_DIR/
+      add_artifact "pmd-report.json" "static-analysis" "PMD static analysis report"
+    fi
+    
+    # Check for ESLint report
+    if [ -f "$(Build.ArtifactStagingDirectory)/eslint-report.json" ]; then
+      cp $(Build.ArtifactStagingDirectory)/eslint-report.json $REPORTS_DIR/
+      add_artifact "eslint-report.json" "static-analysis" "ESLint analysis report"
+    fi
+    
+    echo ""
+    echo "✅ Artifacts collected"
+    
+  displayName: 'Collect Quality Artifacts'
+  continueOnError: true
+
+- script: |
+    echo "================================================"
+    echo "PACKAGING DEPLOYMENT ARTIFACTS"
+    echo "================================================"
+    
+    if [ "${{ parameters.includeDeploymentPackage }}" != "True" ]; then
+      echo "Deployment package inclusion disabled"
+      exit 0
+    fi
+    
+    REPORTS_DIR=$(Build.ArtifactStagingDirectory)/quality-reports
+    DEPLOY_DIR=$REPORTS_DIR/deployment-package
+    
+    mkdir -p $DEPLOY_DIR
+    
+    # Copy deployment artifacts if they exist
+    if [ -f "manifest/package.xml" ]; then
+      echo "Including deployment package.xml..."
+      cp manifest/package.xml $DEPLOY_DIR/
+      echo "  ✅ package.xml"
+    fi
+    
+    if [ -f "$(Build.ArtifactStagingDirectory)/delta-reports/package.xml" ]; then
+      echo "Including delta package.xml..."
+      cp $(Build.ArtifactStagingDirectory)/delta-reports/package.xml $DEPLOY_DIR/delta-package.xml
+      echo "  ✅ delta-package.xml"
+    fi
+    
+    if [ -f "$(Build.ArtifactStagingDirectory)/delta-reports/deploy-id.txt" ]; then
+      echo "Including deploy ID for quick deploy..."
+      cp $(Build.ArtifactStagingDirectory)/delta-reports/deploy-id.txt $DEPLOY_DIR/
+      echo "  ✅ deploy-id.txt"
+    fi
+    
+    # Create deployment summary
+    cat > $DEPLOY_DIR/deployment-summary.json << EOF
+    {
+      "buildNumber": "$(Build.BuildNumber)",
+      "branch": "$(Build.SourceBranchName)",
+      "commit": "$(Build.SourceVersion)",
+      "validated": $([ -f "$DEPLOY_DIR/deploy-id.txt" ] && echo "true" || echo "false"),
+      "packageGenerated": $([ -f "$DEPLOY_DIR/package.xml" ] && echo "true" || echo "false"),
+      "deltaPackageGenerated": $([ -f "$DEPLOY_DIR/delta-package.xml" ] && echo "true" || echo "false"),
+      "readyForQuickDeploy": $([ -f "$DEPLOY_DIR/deploy-id.txt" ] && echo "true" || echo "false")
+    }
+    EOF
+    
+    echo ""
+    echo "✅ Deployment artifacts packaged"
+    
+  displayName: 'Package Deployment Artifacts'
+  condition: eq('${{ parameters.includeDeploymentPackage }}', 'True')
+  continueOnError: true
+
+- script: |
+    echo "================================================"
+    echo "GENERATING SUMMARY REPORT"
+    echo "================================================"
+    
+    REPORTS_DIR=$(Build.ArtifactStagingDirectory)/quality-reports
+    SUMMARY=$REPORTS_DIR/summary-report.md
+    
+    # Create markdown summary
+    cat > $SUMMARY << 'EOF'
+    # Quality Report Summary
+    
+    ## Build Information
+    
+    - **Build Number**: $(Build.BuildNumber)
+    - **Build ID**: $(Build.BuildId)
+    - **Branch**: $(Build.SourceBranchName)
+    - **Commit**: $(Build.SourceVersion)
+    - **Triggered By**: $(Build.RequestedFor)
+    - **Build Time**: $(System.PipelineStartTime)
+    
+    ## Quality Metrics
+    
+    EOF
+    
+    # Add metrics if available
+    if [ -f "$REPORTS_DIR/metrics.json" ]; then
+      COVERAGE=$(cat $REPORTS_DIR/metrics.json | jq -r '.metrics.coverage.percentage // "N/A"')
+      TESTS=$(cat $REPORTS_DIR/metrics.json | jq -r '.metrics.coverage.testsRan // "N/A"')
+      SECURITY=$(cat $REPORTS_DIR/metrics.json | jq -r '.metrics.security.securityScore // "N/A"')
+      DEBT=$(cat $REPORTS_DIR/metrics.json | jq -r '.metrics.technicalDebt.estimatedHours // "N/A"')
+      
+      cat >> $SUMMARY << EOF
+    ### Coverage
+    - **Org-Wide Coverage**: ${COVERAGE}%
+    - **Tests Executed**: $TESTS
+    
+    ### Security
+    - **Security Score**: ${SECURITY}/100
+    
+    ### Technical Debt
+    - **Estimated Hours**: $DEBT
+    
+    EOF
+    fi
+    
+    # Add gate results if available
+    if [ -f "$REPORTS_DIR/gate-results.json" ]; then
+      OVERALL=$(cat $REPORTS_DIR/gate-results.json | jq -r '.overallStatus // "UNKNOWN"')
+      PASSED=$(cat $REPORTS_DIR/gate-results.json | jq -r '.summary.passedGates // "0"')
+      TOTAL=$(cat $REPORTS_DIR/gate-results.json | jq -r '.summary.totalGates // "0"')
+      
+      cat >> $SUMMARY << EOF
+    ## Quality Gate Results
+    
+    - **Overall Status**: **$OVERALL**
+    - **Gates Passed**: ${PASSED}/${TOTAL}
+    
+    ### Individual Gates
+    
+    EOF
+      
+      # Add individual gate results
+      for gate in coverage security technicalDebt performance; do
+        STATUS=$(cat $REPORTS_DIR/gate-results.json | jq -r ".gates.$gate.status // \"N/A\"")
+        MESSAGE=$(cat $REPORTS_DIR/gate-results.json | jq -r ".gates.$gate.message // \"N/A\"")
+        
+        ICON="✅"
+        if [ "$STATUS" != "PASS" ]; then
+          ICON="❌"
+        fi
+        
+        echo "- $ICON **$gate**: $MESSAGE" >> $SUMMARY
+      done
+    fi
+    
+    # Add artifacts list
+    cat >> $SUMMARY << 'EOF'
+    
+    ## Artifacts Included
+    
+    EOF
+    
+    if [ -f "$REPORTS_DIR/artifact-manifest.json" ]; then
+      cat $REPORTS_DIR/artifact-manifest.json | jq -r '.artifacts[] | "- `\(.filename)` - \(.description) (\(.size) bytes)"' >> $SUMMARY
+    fi
+    
+    cat >> $SUMMARY << 'EOF'
+    
+    ## Links
+    
+    - [Build Details]($(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId))
+    - [Test Results]($(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)&view=ms.vss-test-web.build-test-results-tab)
+    - [Artifacts]($(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)&view=artifacts)
+    
+    ---
+    *Generated by Salesforce CI/CD Pipeline*
+    EOF
+    
+    echo ""
+    echo "Summary Report:"
+    echo "──────────────────────────────────────────"
+    cat $SUMMARY
+    echo "──────────────────────────────────────────"
+    echo ""
+    echo "✅ Summary report generated: summary-report.md"
+    
+  displayName: 'Generate Summary Report'
+  continueOnError: true
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Quality Reports'
+  condition: always()
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/quality-reports'
+    ArtifactName: '${{ parameters.artifactName }}'
+    publishLocation: 'Container'

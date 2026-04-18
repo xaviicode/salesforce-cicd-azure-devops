@@ -1,0 +1,276 @@
+parameters:
+- name: targetOrg
+  type: string
+  default: 'cicd-org'
+- name: testLevel
+  type: string
+  default: 'RunLocalTests'
+- name: sourceDir
+  type: string
+  default: 'force-app/main/default'
+- name: checkOnly
+  type: boolean
+  default: true
+- name: waitTime
+  type: number
+  default: 33
+
+steps:
+- script: |
+    echo "============================================"
+    echo "DEPLOYMENT VALIDATION - CONFIGURATION"
+    echo "============================================"
+    echo "Target Org: ${{ parameters.targetOrg }}"
+    echo "Test Level: ${{ parameters.testLevel }}"
+    echo "Source Directory: ${{ parameters.sourceDir }}"
+    echo "Check Only Mode: ${{ parameters.checkOnly }}"
+    echo "Wait Time: ${{ parameters.waitTime }} minutes"
+    echo ""
+  displayName: 'Deployment Validation - Configuration'
+
+- script: |
+    echo "Preparing deployment validation environment..."
+    
+    mkdir -p $(Build.ArtifactStagingDirectory)/deployment-reports
+    mkdir -p $(Build.ArtifactStagingDirectory)/deployment-logs
+    
+    sf org display --target-org ${{ parameters.targetOrg }} --json > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+      echo "ERROR: Cannot connect to org ${{ parameters.targetOrg }}"
+      exit 1
+    fi
+    
+    echo "Deployment validation environment prepared successfully"
+  displayName: 'Deployment Validation - Environment Preparation'
+
+- script: |
+    echo "============================================"
+    echo "VALIDATING DEPLOYMENT (CHECK-ONLY MODE)"
+    echo "============================================"
+    
+    echo "Starting deployment validation..."
+    echo "This will validate the deployment without actually deploying to the org"
+    echo ""
+    
+    # Ejecutar validación y capturar output
+    sf project deploy validate \
+      --source-dir ${{ parameters.sourceDir }} \
+      --target-org ${{ parameters.targetOrg }} \
+      --test-level ${{ parameters.testLevel }} \
+      --wait ${{ parameters.waitTime }} \
+      --verbose \
+      --json \
+      2>&1 | tee $(Build.ArtifactStagingDirectory)/deployment-logs/validation-output.log
+    
+    VALIDATION_EXIT_CODE=${PIPESTATUS[0]}
+    
+    # Extraer solo el JSON del output
+    cat $(Build.ArtifactStagingDirectory)/deployment-logs/validation-output.log | grep -A 99999 '^{' > $(Build.ArtifactStagingDirectory)/deployment-logs/validation-result.json || true
+    
+    echo ""
+    echo "Validation exit code: $VALIDATION_EXIT_CODE"
+    echo $VALIDATION_EXIT_CODE > $(Build.ArtifactStagingDirectory)/deployment-logs/validation-exit-code.txt
+    
+    if [ $VALIDATION_EXIT_CODE -eq 0 ]; then
+      echo ""
+      echo "DEPLOYMENT VALIDATION: SUCCESS"
+      echo "The deployment can be executed safely"
+    else
+      echo ""
+      echo "DEPLOYMENT VALIDATION: FAILED"
+      echo "There are issues that must be resolved before deployment"
+      echo ""
+      echo "ERROR DETAILS:"
+      echo "--------------"
+      # Mostrar errores si existen en el JSON
+      if [ -f "$(Build.ArtifactStagingDirectory)/deployment-logs/validation-result.json" ]; then
+        cat $(Build.ArtifactStagingDirectory)/deployment-logs/validation-result.json | jq -r '.message // "No error message available"' || echo "Could not parse error message"
+      fi
+    fi
+  displayName: 'Deployment Validation - Execute Check-Only'
+  continueOnError: true
+
+- script: |
+    echo "============================================"
+    echo "PARSING VALIDATION RESULTS"
+    echo "============================================"
+    
+    RESULT_FILE="$(Build.ArtifactStagingDirectory)/deployment-logs/validation-result.json"
+    
+    if [ ! -f "$RESULT_FILE" ]; then
+      echo "WARNING: Validation result file not found"
+      exit 0
+    fi
+    
+    echo "Extracting validation metrics..."
+    
+    STATUS=$(cat "$RESULT_FILE" | jq -r '.result.status // "Unknown"')
+    JOB_ID=$(cat "$RESULT_FILE" | jq -r '.result.id // "N/A"')
+    COMPONENTS_DEPLOYED=$(cat "$RESULT_FILE" | jq -r '.result.numberComponentsDeployed // 0')
+    COMPONENTS_TOTAL=$(cat "$RESULT_FILE" | jq -r '.result.numberComponentsTotal // 0')
+    TESTS_COMPLETED=$(cat "$RESULT_FILE" | jq -r '.result.numberTestsCompleted // 0')
+    TESTS_TOTAL=$(cat "$RESULT_FILE" | jq -r '.result.numberTestsTotal // 0')
+    
+    echo ""
+    echo "VALIDATION RESULTS:"
+    echo "-------------------"
+    echo "Status: $STATUS"
+    echo "Job ID: $JOB_ID"
+    echo "Components Validated: $COMPONENTS_DEPLOYED / $COMPONENTS_TOTAL"
+    echo "Tests Executed: $TESTS_COMPLETED / $TESTS_TOTAL"
+    echo ""
+    
+    echo "##vso[task.setvariable variable=DEPLOYMENT_JOB_ID]$JOB_ID"
+    echo "##vso[task.setvariable variable=DEPLOYMENT_STATUS]$STATUS"
+    echo "##vso[task.setvariable variable=COMPONENTS_VALIDATED]$COMPONENTS_DEPLOYED"
+    
+    echo "DEPLOYMENT VALIDATION SUMMARY" > $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    echo "=============================" >> $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    echo "Target Org: ${{ parameters.targetOrg }}" >> $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    echo "Test Level: ${{ parameters.testLevel }}" >> $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    echo "" >> $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    echo "RESULTS:" >> $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    echo "--------" >> $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    echo "Status: $STATUS" >> $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    echo "Validation Job ID: $JOB_ID" >> $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    echo "Components: $COMPONENTS_DEPLOYED / $COMPONENTS_TOTAL" >> $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    echo "Tests: $TESTS_COMPLETED / $TESTS_TOTAL" >> $(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt
+    
+    echo "Validation results parsed successfully"
+  displayName: 'Deployment Validation - Parse Results'
+
+- script: |
+    echo "============================================"
+    echo "ANALYZING DEPLOYMENT ERRORS"
+    echo "============================================"
+    
+    RESULT_FILE="$(Build.ArtifactStagingDirectory)/deployment-logs/validation-result.json"
+    
+    if [ ! -f "$RESULT_FILE" ]; then
+      echo "No result file to analyze"
+      exit 0
+    fi
+    
+    ERRORS=$(cat "$RESULT_FILE" | jq -r '.result.details.componentFailures[]? | "\(.componentType) - \(.fileName): \(.problem)"' 2>/dev/null)
+    
+    if [ -z "$ERRORS" ]; then
+      echo "No deployment errors detected"
+      echo "All components validated successfully"
+    else
+      echo "DEPLOYMENT ERRORS DETECTED:"
+      echo "---------------------------"
+      echo "$ERRORS"
+      echo ""
+      echo "$ERRORS" > $(Build.ArtifactStagingDirectory)/deployment-reports/deployment-errors.txt
+      
+      ERROR_COUNT=$(echo "$ERRORS" | wc -l)
+      echo "Total errors: $ERROR_COUNT"
+    fi
+    
+    TEST_FAILURES=$(cat "$RESULT_FILE" | jq -r '.result.details.runTestResult.failures[]? | "\(.name).\(.methodName): \(.message)"' 2>/dev/null)
+    
+    if [ ! -z "$TEST_FAILURES" ]; then
+      echo ""
+      echo "TEST FAILURES:"
+      echo "--------------"
+      echo "$TEST_FAILURES"
+      echo "$TEST_FAILURES" > $(Build.ArtifactStagingDirectory)/deployment-reports/test-failures.txt
+    fi
+  displayName: 'Deployment Validation - Analyze Errors'
+  condition: always()
+
+- script: |
+    echo "============================================"
+    echo "QUICK DEPLOY PREPARATION"
+    echo "============================================"
+    
+    SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt"
+    
+    if [ ! -f "$SUMMARY_FILE" ]; then
+      echo "WARNING: Summary file not found"
+      exit 0
+    fi
+    
+    STATUS=$(grep "Status:" "$SUMMARY_FILE" | awk '{print $2}')
+    JOB_ID=$(grep "Validation Job ID:" "$SUMMARY_FILE" | awk '{print $4}')
+    
+    echo "Validation Status: $STATUS"
+    echo "Validation Job ID: $JOB_ID"
+    echo ""
+    
+    if [ "$STATUS" = "Succeeded" ] || [ "$STATUS" = "Success" ]; then
+      echo "QUICK DEPLOY READY"
+      echo "------------------"
+      echo "This validation can be used for quick deploy:"
+      echo ""
+      echo "Command to execute quick deploy:"
+      echo "sf project deploy quick --job-id $JOB_ID --target-org ${{ parameters.targetOrg }}"
+      echo ""
+      
+      echo "QUICK_DEPLOY_COMMAND=sf project deploy quick --job-id $JOB_ID --target-org ${{ parameters.targetOrg }}" > $(Build.ArtifactStagingDirectory)/deployment-reports/quick-deploy-command.txt
+      
+      echo "Quick deploy command saved to artifacts"
+    else
+      echo "QUICK DEPLOY NOT AVAILABLE"
+      echo "Validation must succeed before quick deploy can be used"
+    fi
+  displayName: 'Deployment Validation - Quick Deploy Prep'
+
+- script: |
+    echo "============================================"
+    echo "DEPLOYMENT VALIDATION GATE"
+    echo "============================================"
+    
+    EXIT_CODE_FILE="$(Build.ArtifactStagingDirectory)/deployment-logs/validation-exit-code.txt"
+    
+    if [ ! -f "$EXIT_CODE_FILE" ]; then
+      echo "ERROR: Cannot determine validation status"
+      exit 1
+    fi
+    
+    EXIT_CODE=$(cat "$EXIT_CODE_FILE")
+    
+    echo "Validation Exit Code: $EXIT_CODE"
+    echo ""
+    
+    if [ "$EXIT_CODE" -eq 0 ]; then
+      echo "DEPLOYMENT VALIDATION GATE: PASSED"
+      echo "Deployment is ready to proceed"
+      echo "All components validated successfully"
+      exit 0
+    else
+      echo "DEPLOYMENT VALIDATION GATE: FAILED"
+      echo "Deployment cannot proceed - issues must be resolved"
+      echo "Check deployment errors in artifacts for details"
+      exit 1
+    fi
+  displayName: 'Deployment Validation - Gate Check'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Deployment Validation - Publish Artifacts'
+  condition: always()
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/deployment-reports'
+    ArtifactName: 'Deployment-Validation-Report'
+    publishLocation: 'Container'
+
+- script: |
+    echo "============================================"
+    echo "DEPLOYMENT VALIDATION - FINAL STATUS"
+    echo "============================================"
+    
+    SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/deployment-reports/validation-summary.txt"
+    
+    if [ -f "$SUMMARY_FILE" ]; then
+      cat "$SUMMARY_FILE"
+      echo ""
+      echo "STATUS: COMPLETED"
+      echo "Deployment validation executed successfully"
+      echo "Review artifacts for detailed validation results"
+    else
+      echo "STATUS: COMPLETED (Limited data)"
+      echo "Basic validation checks passed"
+    fi
+  displayName: 'Deployment Validation - Final Summary'
+  condition: always()

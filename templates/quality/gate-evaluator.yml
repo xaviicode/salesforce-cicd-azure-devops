@@ -1,0 +1,421 @@
+# templates/quality/gate-evaluator.yml
+# Quality Gate Evaluation Template
+# Evaluates quality metrics against defined thresholds
+
+parameters:
+- name: metricsFile
+  type: string
+  default: '$(Build.ArtifactStagingDirectory)/quality-reports/metrics.json'
+- name: coverageMinimum
+  type: number
+  default: 75
+- name: criticalSecurityMax
+  type: number
+  default: 0
+- name: technicalDebtMax
+  type: number
+  default: 100
+- name: performanceQueryMax
+  type: number
+  default: 1000
+- name: failOnGateViolation
+  type: boolean
+  default: false
+
+steps:
+- script: |
+    echo "================================================"
+    echo "QUALITY GATE EVALUATION"
+    echo "================================================"
+    echo "Metrics File: ${{ parameters.metricsFile }}"
+    echo "Coverage Minimum: ${{ parameters.coverageMinimum }}%"
+    echo "Critical Security Max: ${{ parameters.criticalSecurityMax }}"
+    echo "Technical Debt Max: ${{ parameters.technicalDebtMax }} hours"
+    echo "Performance Query Max: ${{ parameters.performanceQueryMax }}ms"
+    echo "Fail on Violation: ${{ parameters.failOnGateViolation }}"
+    echo ""
+    
+    # Initialize gate results
+    GATE_RESULTS=$(Build.ArtifactStagingDirectory)/quality-reports/gate-results.json
+    
+    cat > $GATE_RESULTS << 'EOF'
+    {
+      "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+      "build": "$(Build.BuildNumber)",
+      "gates": {},
+      "overallStatus": "PENDING"
+    }
+    EOF
+    
+    echo "Gate evaluation initialized"
+    
+  displayName: 'Initialize Gate Evaluation'
+
+- script: |
+    echo "================================================"
+    echo "GATE 1: CODE COVERAGE THRESHOLD"
+    echo "================================================"
+    
+    METRICS_FILE="${{ parameters.metricsFile }}"
+    GATE_RESULTS=$(Build.ArtifactStagingDirectory)/quality-reports/gate-results.json
+    
+    if [ ! -f "$METRICS_FILE" ]; then
+      echo "❌ ERROR: Metrics file not found"
+      echo "Run metrics-calculator.yml first"
+      exit 1
+    fi
+    
+    # Extract coverage metrics
+    COVERAGE=$(cat $METRICS_FILE | jq -r '.metrics.coverage.percentage // "0"' 2>/dev/null)
+    COVERAGE_STATUS=$(cat $METRICS_FILE | jq -r '.metrics.coverage.status // "UNKNOWN"' 2>/dev/null)
+    
+    echo ""
+    echo "Coverage Metrics:"
+    echo "  Current Coverage: ${COVERAGE}%"
+    echo "  Required Minimum: ${{ parameters.coverageMinimum }}%"
+    echo "  Status: $COVERAGE_STATUS"
+    
+    # Evaluate gate
+    GATE_STATUS="FAIL"
+    GATE_MESSAGE="Coverage below threshold"
+    
+    if [ "$COVERAGE_STATUS" = "PASS" ]; then
+      GATE_STATUS="PASS"
+      GATE_MESSAGE="Coverage meets minimum threshold"
+      echo ""
+      echo "✅ GATE PASSED: Code coverage threshold met"
+    else
+      echo ""
+      echo "❌ GATE FAILED: Code coverage below threshold"
+      echo "   Required: ${{ parameters.coverageMinimum }}%"
+      echo "   Actual: ${COVERAGE}%"
+      echo "   Gap: $(echo "${{ parameters.coverageMinimum }} - $COVERAGE" | bc)%"
+    fi
+    
+    # Save gate result
+    jq --arg status "$GATE_STATUS" \
+       --arg message "$GATE_MESSAGE" \
+       --arg coverage "$COVERAGE" \
+       --arg threshold "${{ parameters.coverageMinimum }}" \
+       '.gates.coverage = {
+         "status": $status,
+         "message": $message,
+         "actual": ($coverage | tonumber),
+         "threshold": ($threshold | tonumber),
+         "evaluated": true
+       }' $GATE_RESULTS > temp.json
+    
+    mv temp.json $GATE_RESULTS
+    
+    # Set pipeline variable
+    echo "##vso[task.setvariable variable=CoverageGateStatus]$GATE_STATUS"
+    
+  displayName: 'Evaluate Coverage Gate'
+  continueOnError: true
+
+- script: |
+    echo "================================================"
+    echo "GATE 2: SECURITY VULNERABILITIES"
+    echo "================================================"
+    
+    METRICS_FILE="${{ parameters.metricsFile }}"
+    GATE_RESULTS=$(Build.ArtifactStagingDirectory)/quality-reports/gate-results.json
+    
+    # Extract security metrics
+    CRITICAL_ISSUES=$(cat $METRICS_FILE | jq -r '.metrics.security.criticalIssues // "0"' 2>/dev/null)
+    TOTAL_VIOLATIONS=$(cat $METRICS_FILE | jq -r '.metrics.security.totalViolations // "0"' 2>/dev/null)
+    SECURITY_SCORE=$(cat $METRICS_FILE | jq -r '.metrics.security.securityScore // "0"' 2>/dev/null)
+    SECURITY_STATUS=$(cat $METRICS_FILE | jq -r '.metrics.security.status // "UNKNOWN"' 2>/dev/null)
+    
+    echo ""
+    echo "Security Metrics:"
+    echo "  Critical Issues: $CRITICAL_ISSUES"
+    echo "  Total Violations: $TOTAL_VIOLATIONS"
+    echo "  Security Score: ${SECURITY_SCORE}/100"
+    echo "  Maximum Allowed Critical: ${{ parameters.criticalSecurityMax }}"
+    
+    # Evaluate gate
+    GATE_STATUS="FAIL"
+    GATE_MESSAGE="Critical security issues found"
+    
+    if [ "$CRITICAL_ISSUES" -le "${{ parameters.criticalSecurityMax }}" ]; then
+      GATE_STATUS="PASS"
+      GATE_MESSAGE="No critical security issues"
+      echo ""
+      echo "✅ GATE PASSED: No critical security vulnerabilities"
+    else
+      echo ""
+      echo "❌ GATE FAILED: Critical security issues detected"
+      echo "   Maximum Allowed: ${{ parameters.criticalSecurityMax }}"
+      echo "   Found: $CRITICAL_ISSUES"
+      echo "   Excess: $(echo "$CRITICAL_ISSUES - ${{ parameters.criticalSecurityMax }}" | bc)"
+    fi
+    
+    # Save gate result
+    jq --arg status "$GATE_STATUS" \
+       --arg message "$GATE_MESSAGE" \
+       --arg critical "$CRITICAL_ISSUES" \
+       --arg total "$TOTAL_VIOLATIONS" \
+       --arg score "$SECURITY_SCORE" \
+       --arg threshold "${{ parameters.criticalSecurityMax }}" \
+       '.gates.security = {
+         "status": $status,
+         "message": $message,
+         "criticalIssues": ($critical | tonumber),
+         "totalViolations": ($total | tonumber),
+         "securityScore": ($score | tonumber),
+         "threshold": ($threshold | tonumber),
+         "evaluated": true
+       }' $GATE_RESULTS > temp.json
+    
+    mv temp.json $GATE_RESULTS
+    
+    # Set pipeline variable
+    echo "##vso[task.setvariable variable=SecurityGateStatus]$GATE_STATUS"
+    
+  displayName: 'Evaluate Security Gate'
+  continueOnError: true
+
+- script: |
+    echo "================================================"
+    echo "GATE 3: TECHNICAL DEBT"
+    echo "================================================"
+    
+    METRICS_FILE="${{ parameters.metricsFile }}"
+    GATE_RESULTS=$(Build.ArtifactStagingDirectory)/quality-reports/gate-results.json
+    
+    # Extract technical debt metrics
+    DEBT_HOURS=$(cat $METRICS_FILE | jq -r '.metrics.technicalDebt.estimatedHours // "0"' 2>/dev/null)
+    DEBT_STATUS=$(cat $METRICS_FILE | jq -r '.metrics.technicalDebt.status // "UNKNOWN"' 2>/dev/null)
+    APEX_LOC=$(cat $METRICS_FILE | jq -r '.metrics.technicalDebt.apexLinesOfCode // "0"' 2>/dev/null)
+    
+    echo ""
+    echo "Technical Debt Metrics:"
+    echo "  Estimated Hours: $DEBT_HOURS"
+    echo "  Apex Lines of Code: $APEX_LOC"
+    echo "  Maximum Allowed: ${{ parameters.technicalDebtMax }} hours"
+    echo "  Status: $DEBT_STATUS"
+    
+    # Evaluate gate
+    GATE_STATUS="FAIL"
+    GATE_MESSAGE="Technical debt exceeds threshold"
+    
+    DEBT_CHECK=$(echo "$DEBT_HOURS <= ${{ parameters.technicalDebtMax }}" | bc)
+    
+    if [ "$DEBT_CHECK" -eq 1 ]; then
+      GATE_STATUS="PASS"
+      GATE_MESSAGE="Technical debt within acceptable limits"
+      echo ""
+      echo "✅ GATE PASSED: Technical debt within threshold"
+    else
+      echo ""
+      echo "❌ GATE FAILED: Technical debt exceeds threshold"
+      echo "   Maximum Allowed: ${{ parameters.technicalDebtMax }} hours"
+      echo "   Current: $DEBT_HOURS hours"
+      echo "   Excess: $(echo "$DEBT_HOURS - ${{ parameters.technicalDebtMax }}" | bc) hours"
+    fi
+    
+    # Save gate result
+    jq --arg status "$GATE_STATUS" \
+       --arg message "$GATE_MESSAGE" \
+       --arg debt "$DEBT_HOURS" \
+       --arg threshold "${{ parameters.technicalDebtMax }}" \
+       '.gates.technicalDebt = {
+         "status": $status,
+         "message": $message,
+         "estimatedHours": ($debt | tonumber),
+         "threshold": ($threshold | tonumber),
+         "evaluated": true
+       }' $GATE_RESULTS > temp.json
+    
+    mv temp.json $GATE_RESULTS
+    
+    # Set pipeline variable
+    echo "##vso[task.setvariable variable=TechnicalDebtGateStatus]$GATE_STATUS"
+    
+  displayName: 'Evaluate Technical Debt Gate'
+  continueOnError: true
+
+- script: |
+    echo "================================================"
+    echo "GATE 4: PERFORMANCE THRESHOLDS"
+    echo "================================================"
+    
+    METRICS_FILE="${{ parameters.metricsFile }}"
+    GATE_RESULTS=$(Build.ArtifactStagingDirectory)/quality-reports/gate-results.json
+    
+    # Extract performance metrics
+    MAX_QUERY_TIME=$(cat $METRICS_FILE | jq -r '.metrics.performance.maxQueryTime // "0"' 2>/dev/null)
+    AVG_CPU_TIME=$(cat $METRICS_FILE | jq -r '.metrics.performance.averageCpuTime // "0"' 2>/dev/null)
+    PERF_STATUS=$(cat $METRICS_FILE | jq -r '.metrics.performance.status // "UNKNOWN"' 2>/dev/null)
+    
+    echo ""
+    echo "Performance Metrics:"
+    echo "  Max Query Time: ${MAX_QUERY_TIME}ms"
+    echo "  Avg CPU Time: ${AVG_CPU_TIME}ms"
+    echo "  Threshold: ${{ parameters.performanceQueryMax }}ms"
+    echo "  Status: $PERF_STATUS"
+    
+    # Evaluate gate
+    GATE_STATUS="FAIL"
+    GATE_MESSAGE="Performance threshold exceeded"
+    
+    if [ "$PERF_STATUS" = "PASS" ] || [ "$PERF_STATUS" = "WARNING" ] || [ "$PERF_STATUS" = "SKIPPED" ]; then
+      GATE_STATUS="PASS"
+      GATE_MESSAGE="Performance within acceptable limits"
+      echo ""
+      echo "✅ GATE PASSED: Performance thresholds met"
+    else
+      echo ""
+      echo "❌ GATE FAILED: Performance exceeds threshold"
+      echo "   Maximum Query Time: ${{ parameters.performanceQueryMax }}ms"
+      echo "   Actual: ${MAX_QUERY_TIME}ms"
+    fi
+    
+    # Save gate result
+    jq --arg status "$GATE_STATUS" \
+       --arg message "$GATE_MESSAGE" \
+       --arg maxQuery "$MAX_QUERY_TIME" \
+       --arg threshold "${{ parameters.performanceQueryMax }}" \
+       '.gates.performance = {
+         "status": $status,
+         "message": $message,
+         "maxQueryTime": ($maxQuery | tonumber),
+         "threshold": ($threshold | tonumber),
+         "evaluated": true
+       }' $GATE_RESULTS > temp.json
+    
+    mv temp.json $GATE_RESULTS
+    
+    # Set pipeline variable
+    echo "##vso[task.setvariable variable=PerformanceGateStatus]$GATE_STATUS"
+    
+  displayName: 'Evaluate Performance Gate'
+  continueOnError: true
+
+- script: |
+    echo "================================================"
+    echo "OVERALL GATE STATUS"
+    echo "================================================"
+    
+    GATE_RESULTS=$(Build.ArtifactStagingDirectory)/quality-reports/gate-results.json
+    
+    # Count passed and failed gates
+    TOTAL_GATES=4
+    PASSED_GATES=0
+    FAILED_GATES=0
+    
+    # Check each gate
+    for gate in coverage security technicalDebt performance; do
+      STATUS=$(cat $GATE_RESULTS | jq -r ".gates.$gate.status // \"UNKNOWN\"")
+      if [ "$STATUS" = "PASS" ]; then
+        ((PASSED_GATES++))
+      else
+        ((FAILED_GATES++))
+      fi
+    done
+    
+    echo ""
+    echo "Gate Summary:"
+    echo "  Total Gates: $TOTAL_GATES"
+    echo "  Passed: $PASSED_GATES"
+    echo "  Failed: $FAILED_GATES"
+    echo ""
+    
+    # Determine overall status
+    OVERALL_STATUS="FAIL"
+    if [ $PASSED_GATES -eq $TOTAL_GATES ]; then
+      OVERALL_STATUS="PASS"
+    elif [ $FAILED_GATES -eq 0 ]; then
+      OVERALL_STATUS="PASS"
+    fi
+    
+    # Update overall status
+    jq --arg status "$OVERALL_STATUS" \
+       --arg passed "$PASSED_GATES" \
+       --arg failed "$FAILED_GATES" \
+       --arg total "$TOTAL_GATES" \
+       '.overallStatus = $status |
+        .summary = {
+          "totalGates": ($total | tonumber),
+          "passedGates": ($passed | tonumber),
+          "failedGates": ($failed | tonumber),
+          "passRate": (($passed | tonumber) * 100 / ($total | tonumber))
+        }' $GATE_RESULTS > temp.json
+    
+    mv temp.json $GATE_RESULTS
+    
+    echo "Individual Gate Results:"
+    echo "─────────────────────────────────────────────"
+    
+    # Coverage Gate
+    COVERAGE_STATUS=$(cat $GATE_RESULTS | jq -r '.gates.coverage.status')
+    COVERAGE_MSG=$(cat $GATE_RESULTS | jq -r '.gates.coverage.message')
+    if [ "$COVERAGE_STATUS" = "PASS" ]; then
+      echo "✅ Coverage Gate: $COVERAGE_MSG"
+    else
+      echo "❌ Coverage Gate: $COVERAGE_MSG"
+    fi
+    
+    # Security Gate
+    SECURITY_STATUS=$(cat $GATE_RESULTS | jq -r '.gates.security.status')
+    SECURITY_MSG=$(cat $GATE_RESULTS | jq -r '.gates.security.message')
+    if [ "$SECURITY_STATUS" = "PASS" ]; then
+      echo "✅ Security Gate: $SECURITY_MSG"
+    else
+      echo "❌ Security Gate: $SECURITY_MSG"
+    fi
+    
+    # Technical Debt Gate
+    DEBT_STATUS=$(cat $GATE_RESULTS | jq -r '.gates.technicalDebt.status')
+    DEBT_MSG=$(cat $GATE_RESULTS | jq -r '.gates.technicalDebt.message')
+    if [ "$DEBT_STATUS" = "PASS" ]; then
+      echo "✅ Technical Debt Gate: $DEBT_MSG"
+    else
+      echo "❌ Technical Debt Gate: $DEBT_MSG"
+    fi
+    
+    # Performance Gate
+    PERF_STATUS=$(cat $GATE_RESULTS | jq -r '.gates.performance.status')
+    PERF_MSG=$(cat $GATE_RESULTS | jq -r '.gates.performance.message')
+    if [ "$PERF_STATUS" = "PASS" ]; then
+      echo "✅ Performance Gate: $PERF_MSG"
+    else
+      echo "❌ Performance Gate: $PERF_MSG"
+    fi
+    
+    echo "─────────────────────────────────────────────"
+    echo ""
+    
+    if [ "$OVERALL_STATUS" = "PASS" ]; then
+      echo "��� OVERALL GATE STATUS: PASSED"
+      echo "All quality gates have been met"
+      EXIT_CODE=0
+    else
+      echo "❌ OVERALL GATE STATUS: FAILED"
+      echo "$FAILED_GATES out of $TOTAL_GATES gates failed"
+      echo "Review quality-reports/gate-results.json for details"
+      
+      if [ "${{ parameters.failOnGateViolation }}" = "True" ]; then
+        EXIT_CODE=1
+      else
+        EXIT_CODE=0
+      fi
+    fi
+    
+    # Display full results
+    echo ""
+    echo "Full Gate Results:"
+    cat $GATE_RESULTS | jq '.'
+    
+    # Save exit code for later stages
+    echo $EXIT_CODE > $(Build.ArtifactStagingDirectory)/quality-reports/gate-exit-code.txt
+    
+    # Set pipeline variable
+    echo "##vso[task.setvariable variable=OverallGateStatus]$OVERALL_STATUS"
+    echo "##vso[task.setvariable variable=GateExitCode]$EXIT_CODE"
+    
+    exit $EXIT_CODE
+    
+  displayName: 'Calculate Overall Gate Status'
+  condition: always()
